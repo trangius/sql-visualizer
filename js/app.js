@@ -418,19 +418,20 @@ $('#modeSeg').addEventListener('click', e => {
 const systemDark = matchMedia('(prefers-color-scheme: dark)');
 const isDark = () => (document.documentElement.dataset.theme ?? (systemDark.matches ? 'dark' : 'light')) === 'dark';
 
+// theme: 'light', 'dark' or 'auto' (the system's), chosen at the top of the Theme menu
 function applyTheme(theme) {
   if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
-  $('#themeBtn').title = isDark() ? 'Switch to light mode' : 'Switch to dark mode';
+  for (const b of $('#modePick').children) b.setAttribute('aria-checked', String(b.dataset.mode === (theme === 'light' || theme === 'dark' ? theme : 'auto')));
   applyPalette(); // each theme has a light and a dark variant
 }
 applyTheme(store.get('theme', 'auto'));
 systemDark.addEventListener('change', () => applyTheme(store.get('theme', 'auto')));
-$('#themeBtn').addEventListener('click', () => {
-  const next = isDark() ? 'light' : 'dark';
-  const theme = next === (systemDark.matches ? 'dark' : 'light') ? 'auto' : next;
-  store.set('theme', theme);
-  applyTheme(theme);
+$('#modePick').addEventListener('click', e => {
+  const b = e.target.closest('[data-mode]');
+  if (!b) return;
+  store.set('theme', b.dataset.mode);
+  applyTheme(b.dataset.mode);
 });
 
 // ─── Toast, examples, help, export menu, splitter ────────────────────────────
@@ -797,7 +798,7 @@ if (!/mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.plat
   const pc = s => s.replace('⇧⌘Z', 'Ctrl+Y').replace('⌘⇧', 'Ctrl+Shift+').replace(/⌘(?=\w)/g, 'Ctrl+').replace(/⇧(?=\w)/g, 'Shift+')
     .replace(/⇧/g, 'Shift').replace(/⌘/g, 'Ctrl').replace(/⌫/g, 'Del').replace(/↵/g, 'Enter');
   for (const el of document.querySelectorAll('[title*="⌘"], [title*="⇧"]')) el.title = pc(el.title);
-  for (const el of document.querySelectorAll('.menu .ext, .help-keys span, .find-key')) {
+  for (const el of document.querySelectorAll('.menu .ext, .help-keys span')) {
     if (/[⌘⇧⌫↵]/.test(el.textContent)) el.textContent = pc(el.textContent);
   }
 }

@@ -242,14 +242,10 @@ body.panel-collapsed #left, body.panel-collapsed #split { display: none; }
 .switch-row[aria-checked="true"] .switch i { left: 14px; }
 #sizeLabel { min-width: 44px; text-align: center; font: 12px var(--mono); color: var(--muted); }
 
-#themeBtn .moon { fill: currentColor; }
-#themeBtn .sun { display: none; }
-:root[data-theme="dark"] #themeBtn .sun { display: block; }
-:root[data-theme="dark"] #themeBtn .moon { display: none; }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) #themeBtn .sun { display: block; }
-  :root:not([data-theme="light"]) #themeBtn .moon { display: none; }
-}
+/* Theme menu: Auto / Light / Dark above the themes (it stays open, so you see the change) */
+.menu .mode-pick { margin: 2px 4px 2px; }
+.menu .mode-pick button { flex: 1; justify-content: center; height: 26px; padding: 0 8px; }
+.menu .mode-pick button[aria-checked="true"] { background: var(--panel); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
 
 /* ─── Tabs ─────────────────────────────────────────────────────────────────── */
 .tabbar {
@@ -475,31 +471,22 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .tool:hover { background: var(--hover); }
 .tool.on { background: var(--accent-soft); color: var(--accent); }
 .tool.icon { width: 30px; padding: 0; justify-content: center; }
-/* the finder in the app bar (⌘F / ⌘K): a table or column by name; the view goes to it.
-   While presenting (no app bar) it floats over the canvas. */
+/* the finder (the magnifier in the app bar, ⌘F / ⌘K): a table or column by name; the view goes to it.
+   It drops down from the magnifier, in the app bar's right corner; while presenting (no app bar) it floats over the canvas. */
+.find-slot { position: relative; }
+#findBtn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
 .finder {
-  position: relative; display: flex; align-items: center; width: 280px; height: 32px; cursor: text;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--muted);
-}
-.finder:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--box-bg); }
-.find-ico { flex: none; margin-left: 10px; }
-.finder input { flex: 1; min-width: 0; height: 100%; padding: 0 8px; border: 0; background: none; font-size: 13px; outline: none; }
-.finder input::placeholder { color: var(--muted); }
-.find-key { flex: none; padding-right: 9px; font: 11px var(--mono); color: var(--faint); }
-.finder:focus-within .find-key { display: none; }
-.finder.floating { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 40; width: min(380px, calc(100% - 24px)); box-shadow: var(--shadow); }
-.find-list {
-  position: absolute; top: calc(100% + 6px); left: -1px; width: max(100%, 320px); max-height: 360px; overflow: auto; z-index: 30;
-  display: flex; flex-direction: column; gap: 1px; padding: 4px; cursor: default;
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; width: 340px; padding: 6px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
 }
-.find-list:empty { display: none; }
-@media (max-width: 1100px) { .finder { width: 220px; } }
-/* narrow: just the magnifier until it is used */
-@media (max-width: 760px) {
-  .finder:not(:focus-within) { width: 34px; }
-  .finder:not(:focus-within) input, .finder:not(:focus-within) .find-key { width: 0; padding: 0; opacity: 0; }
+.finder.floating { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 40; width: min(380px, calc(100% - 24px)); }
+.finder input {
+  width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--box-bg); font-size: 13px;
 }
+.finder input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.find-list { max-height: 360px; overflow: auto; margin-top: 4px; display: flex; flex-direction: column; gap: 1px; }
+.find-list:empty { display: none; }
 .find-item {
   display: flex; align-items: center; gap: 12px; flex: none; height: 30px; padding: 0 9px;
   border: 0; border-radius: 6px; background: none; text-align: left; font: 12.5px var(--mono);

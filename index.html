@@ -29,14 +29,6 @@
     <img id="logo" class="logo" alt="SQL Visualizer" title="SQL Visualizer" width="32" height="32">
     <script>document.getElementById('logo').src = document.getElementById('favicon').href; // the icon chosen in <head></script>
   </div>
-  <div class="find-slot">
-    <div id="finder" class="finder">
-      <svg width="14" height="14" class="ico thin find-ico" aria-hidden="true"><circle cx="6" cy="6" r="4.2"/><path d="m9.2 9.2 3.3 3.3"/></svg>
-      <input id="findInput" placeholder="Find table or column" spellcheck="false" autocomplete="off" aria-label="Find a table or column" aria-controls="findList">
-      <span class="find-key" aria-hidden="true">⌘F</span>
-      <div id="findList" class="find-list" role="listbox" aria-label="Tables and columns" hidden></div>
-    </div>
-  </div>
   <div class="spacer"></div>
   <div class="menu-wrap">
     <button id="notationBtn" class="tool" title="Relationship notation" aria-haspopup="menu" aria-expanded="false"><span id="notationIco"></span><span class="lbl">Notation</span></button>
@@ -51,6 +43,13 @@
       <span class="lbl">Theme</span>
     </button>
     <div id="themeMenu" class="menu" role="menu" hidden>
+      <div class="menu-label">Mode</div>
+      <div class="seg mode-pick" id="modePick" role="group" aria-label="Light or dark">
+        <button role="menuitemradio" data-mode="auto" title="Follow the system">Auto</button>
+        <button role="menuitemradio" data-mode="light">Light</button>
+        <button role="menuitemradio" data-mode="dark">Dark</button>
+      </div>
+      <div class="menu-sep"></div>
       <div class="menu-label">Theme</div>
       <div id="themeList"></div>
     </div>
@@ -89,10 +88,15 @@
     </div>
   </div>
   <div class="vsep"></div>
-  <button id="themeBtn" class="icon-btn" aria-label="Toggle dark mode">
-    <svg width="16" height="16" class="ico sun" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>
-    <svg width="16" height="16" class="moon" aria-hidden="true"><path d="M13.6 9.6A6 6 0 0 1 6.4 2.4a6 6 0 1 0 7.2 7.2z"/></svg>
-  </button>
+  <div class="find-slot">
+    <button id="findBtn" class="icon-btn" title="Find a table or column (⌘F)" aria-label="Find a table or column" aria-expanded="false" aria-controls="finder">
+      <svg width="15" height="15" viewBox="0 0 14 14" class="ico thin" aria-hidden="true"><circle cx="6" cy="6" r="4.2"/><path d="m9.2 9.2 3.3 3.3"/></svg>
+    </button>
+    <div id="finder" class="finder" hidden>
+      <input id="findInput" placeholder="Find table or column" spellcheck="false" autocomplete="off" aria-label="Find a table or column" aria-controls="findList">
+      <div id="findList" class="find-list" role="listbox" aria-label="Tables and columns"></div>
+    </div>
+  </div>
 </header>
 
 <nav class="tabbar" aria-label="Diagrams">

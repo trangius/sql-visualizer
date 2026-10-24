@@ -1047,17 +1047,21 @@ function focusTable(name, col = null) {
   if (row) { row.classList.add('kh'); setTimeout(() => row.classList.remove('kh'), 1500); }
 }
 
-// ─── Find (⌘F / ⌘K, the box in the app bar): tables, then columns, whose name has what is typed ──
+// ─── Find (the magnifier in the app bar, ⌘F / ⌘K): tables, then columns, whose name has what is typed ──
 
-const finder = $('#finder'), findInput = $('#findInput'), findList = $('#findList'), findSlot = finder.parentNode;
+const finder = $('#finder'), findInput = $('#findInput'), findList = $('#findList'), findBtn = $('#findBtn'), findSlot = finder.parentNode;
 let found = [], foundAt = 0;
 
 function openFinder() {
   closeMenus();
   if (presentView) { finder.classList.add('floating'); document.body.appendChild(finder); } // the app bar is hidden
+  finder.hidden = false;
+  findBtn.setAttribute('aria-expanded', 'true');
   findInput.focus();
   findInput.select();
+  renderFinder();
 }
+// it closes when the box loses the focus
 const closeFinder = () => findInput.blur();
 
 function renderFinder() {
@@ -1095,12 +1099,14 @@ function moveFound(d) {
   findList.children[foundAt].scrollIntoView({ block: 'nearest' });
 }
 
-findInput.addEventListener('focus', () => { renderFinder(); findList.hidden = false; });
 findInput.addEventListener('blur', () => {
-  findList.hidden = true;
+  finder.hidden = true;
+  findBtn.setAttribute('aria-expanded', 'false');
   if (finder.classList.contains('floating')) { finder.classList.remove('floating'); findSlot.appendChild(finder); }
 });
-finder.addEventListener('pointerdown', e => { if (e.target !== findInput) { e.preventDefault(); findInput.focus(); } }); // the whole box is the field
+finder.addEventListener('pointerdown', e => { if (e.target !== findInput) e.preventDefault(); }); // the box keeps the focus
+findBtn.addEventListener('pointerdown', e => e.preventDefault()); // …so a click on the magnifier while open closes it
+findBtn.onclick = () => finder.hidden ? openFinder() : closeFinder();
 findInput.addEventListener('input', renderFinder);
 findInput.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); moveFound(e.key === 'ArrowDown' ? 1 : -1); }
