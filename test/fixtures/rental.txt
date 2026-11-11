@@ -1,0 +1,43 @@
+Customer
+  Id
+  Name
+  PhoneNr int
+  SSNumber int
+Rental
+  ReceiptId -> Receipt
+  TitleCopyId -> TitleCopy
+  DateRented date
+  ReturnDate date
+  Price int
+RentalProduct
+  Id
+  Title
+  ReleaseDate date null
+  Publisher
+  CategoryId -> Category
+TitleCopy
+  Id
+  TitleId int -> RentalProduct
+  RentedOut bool
+  TypeId int
+  PriceId int -> Price
+Category
+  Id
+  Name
+  ParentId null -> Category
+Receipt
+  Id
+  CustomerId int -> Customer
+  TimeStamp date
+Price
+  Id
+  Price int
+SalesProduct
+  Id
+  Name
+  CategoryId -> Category
+  Price int
+  ReceiptId int -> Receipt
+ProductToSale
+  SalesProductId -> SalesProduct
+  ReceiptId -> Receipt

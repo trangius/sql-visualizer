@@ -226,7 +226,7 @@ function ensurePositions(tables, dims) {
 // In between they are routed orthogonally around the boxes (A* on a grid),
 // with a cost for every bend. An arrow may never run through another arrow's end point, and running
 // along a lane used by an arrow to a *different* Id is very expensive (it would look like it points there).
-const ROUTE = { GAP: 30, MARGIN: 10, STUB: 20, GRID: 10, BEND: 40, SHARE_OTHER: 60, CROSS: 30, MERGE: 0.5 };
+const ROUTE = { GAP: 30, MARGIN: 10, STUB: 20, GRID: 10, BEND: 40, SHARE_OTHER: 60, MERGE: 0.5 };
 
 // side: force a same-side loop ('L' or 'R'); used to try both sides of a self-reference
 function chooseSides(e, side = null) {
@@ -256,12 +256,12 @@ function simplePath(e) {
 // The router's search arrays, kept between calls (it runs on every keystroke and drag frame).
 // A cell's cost counts only if it was set in the current search (seen === stamp), so the
 // arrays don't have to be cleared before each search.
-const routeBuf = { g: new Float64Array(0), prev: new Int32Array(0), seen: new Uint32Array(0), stamp: 0 };
+const routeBuf = { g: new Float64Array(0), crosses: new Uint32Array(0), prev: new Int32Array(0), seen: new Uint32Array(0), stamp: 0 };
 
 function routeEdges(edges, boxes) {
   if (!edges.length) return;
   edges.forEach(e => chooseSides(e));
-  const { MARGIN, GRID, BEND, SHARE_OTHER, CROSS, MERGE } = ROUTE;
+  const { MARGIN, GRID, BEND, SHARE_OTHER, MERGE } = ROUTE;
   // a self-reference can loop around either side: both are tried, the cheaper one wins
   const SIDE_KEYS = ['x1', 'x2', 'outDir', 'inDir', 'sx', 'tx'];
   const variants = e => e.a !== e.b ? [e] : ['L', 'R'].map(side => {
@@ -271,19 +271,21 @@ function routeEdges(edges, boxes) {
   });
   const allVariants = edges.flatMap(variants);
 
-  // Grid lines: every GRID px, plus the exact stub and row coordinates
-  const pad = 80;
-  const x0 = Math.min(...boxes.map(b => b.x)) - pad, x1 = Math.max(...boxes.map(b => b.x + b.w)) + pad;
-  const y0 = Math.min(...boxes.map(b => b.y)) - pad, y1 = Math.max(...boxes.map(b => b.y + b.h)) + pad;
-  let step = GRID;
-  while (((x1 - x0) / step) * ((y1 - y0) / step) > 60000) step *= 2;
-  const coords = (lo, hi, extra) => {
-    const s = new Set(extra);
-    for (let v = Math.floor(lo / step) * step; v <= hi; v += step) s.add(v);
-    return [...s].sort((p, q) => p - q);
+  // Route on obstacle boundaries and port lanes, rather than filling empty
+  // space with a dense grid. Include box edges so no step can jump through a box.
+  const coords = values => {
+    const sorted = [...new Set(values)].sort((a, b) => a - b), out = new Set(sorted);
+    out.add(sorted[0] - 80); out.add(sorted[sorted.length - 1] + 80);
+    for (let i = 1; i < sorted.length; i++) {
+      const mid = Math.round((sorted[i - 1] + sorted[i]) / (2 * GRID)) * GRID;
+      if (mid > sorted[i - 1] && mid < sorted[i]) out.add(mid);
+    }
+    return [...out].sort((a, b) => a - b);
   };
-  const xs = coords(x0, x1, allVariants.flatMap(e => [e.sx, e.tx]));
-  const ys = coords(y0, y1, edges.flatMap(e => [e.sy, e.ty]));
+  const xs = coords([...boxes.flatMap(b => [b.x - MARGIN, b.x, b.x + b.w, b.x + b.w + MARGIN]),
+    ...allVariants.flatMap(e => [e.sx, e.tx])]);
+  const ys = coords([...boxes.flatMap(b => [b.y - MARGIN, b.y, b.y + b.h, b.y + b.h + MARGIN]),
+    ...edges.flatMap(e => [e.sy, e.ty])]);
   const nx = xs.length, ny = ys.length;
   const xi = new Map(xs.map((v, i) => [v, i])), yi = new Map(ys.map((v, i) => [v, i]));
 
@@ -304,24 +306,24 @@ function routeEdges(edges, boxes) {
     reserved.set(yi.get(e.ty) * nx + xi.get(e.tx), 'T:' + e.to);
   }
   const used = new Map(); // "nodeA-nodeB" → set of targets whose arrows use that grid segment
-  const usedNodes = new Map(); // node → set of targets whose arrows pass it (crossing it costs a little)
+  const usedNodes = new Map(); // node → set of targets whose arrows pass it
   const segKey = (p, q) => p < q ? p + '-' + q : q + '-' + p;
   const DX = [1, -1, 0, 0], DY = [0, 0, 1, -1], REV = [1, 0, 3, 2];
   const size = nx * ny * 4;
   if (routeBuf.g.length < size) {
-    Object.assign(routeBuf, { g: new Float64Array(size), prev: new Int32Array(size), seen: new Uint32Array(size), stamp: 0 });
+    Object.assign(routeBuf, { g: new Float64Array(size), crosses: new Uint32Array(size), prev: new Int32Array(size), seen: new Uint32Array(size), stamp: 0 });
   }
-  const { g, prev, seen } = routeBuf;
+  const { g, crosses, prev, seen } = routeBuf;
 
   // short arrows first, so they get the direct lanes; self-references last, to see what's taken
   const len = e => e.a === e.b ? Infinity : Math.abs(e.sx - e.tx) + Math.abs(e.sy - e.ty);
-  const order = [...edges].sort((p, q) => len(p) - len(q));
+  const order = [...edges].sort((p, q) => (len(p) - len(q)) || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0));
   for (const e of order) {
     let best = null;
     for (const v of variants(e)) {
       const s = yi.get(v.sy) * nx + xi.get(v.sx), t = yi.get(v.ty) * nx + xi.get(v.tx);
       const r = !blocked[s] && !blocked[t] ? astar(s, t, v) : null;
-      if (r && (!best || r.cost < best.cost)) best = { ...r, v };
+      if (r && (!best || r.crossings < best.crossings || (r.crossings === best.crossings && r.cost < best.cost))) best = { ...r, v };
     }
     if (!best) { e.points = simplePath(e); continue; }
     for (const k of SIDE_KEYS) e[k] = best.v[k];
@@ -353,28 +355,31 @@ function routeEdges(edges, boxes) {
     };
     const crossCost = (n, key) => {
       if (used.get(key)?.has(e.to)) return 0;
-      return usedNodes.get(n)?.size ? CROSS : 0;
+      return usedNodes.get(n)?.size ? 1 : 0;
     };
     if (++routeBuf.stamp === 0xffffffff) { seen.fill(0); routeBuf.stamp = 1; }
     const stamp = routeBuf.stamp;
     const tx = xs[t % nx], ty = ys[Math.floor(t / nx)];
-    const h = n => Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty);
-    const heap = new MinHeap();
+    // Merged lanes cost less per pixel, so scale the heuristic to remain admissible.
+    const h = n => (1 - MERGE) * (Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty));
+    // Crossings take precedence over length and bends, as in auto layout.
+    const heap = new MinHeap((a, b) => a[0] - b[0] || a[1] - b[1]);
     const s0 = s * 4 + dir0;
     g[s0] = 0;
+    crosses[s0] = 0;
     prev[s0] = -1;
     seen[s0] = stamp;
-    heap.push(h(s), s0);
+    heap.push([0, h(s)], s0);
     while (heap.size) {
       const st = heap.pop();
       const n = st >> 2, d = st & 3, gc = g[st];
       if (n === t && d === dirEnd) {
         const nodes = [];
         for (let c = st; c !== -1; c = prev[c]) if (!nodes.length || nodes[nodes.length - 1] !== c >> 2) nodes.push(c >> 2);
-        return { nodes: nodes.reverse(), cost: gc };
+        return { nodes: nodes.reverse(), cost: gc, crossings: crosses[st] };
       }
       if (n === t) { // turn in place to leave the stub in the entry direction
-        relax(st, t * 4 + dirEnd, gc + BEND, 0);
+        relax(st, t * 4 + dirEnd, gc + BEND, crosses[st], 0);
         continue;
       }
       const i = n % nx, j = Math.floor(n / nx);
@@ -388,18 +393,19 @@ function routeEdges(edges, boxes) {
         if (r && m !== t && r !== myT) continue;
         const len = Math.abs(xs[ii] - xs[i]) + Math.abs(ys[jj] - ys[j]);
         const key = segKey(n, m);
-        const cost = gc + len * (1 + shareCost(key)) + crossCost(m, key) + (nd === d ? 0 : BEND);
-        relax(st, m * 4 + nd, cost, h(m));
+        const cost = gc + len * (1 + shareCost(key)) + (nd === d ? 0 : BEND);
+        relax(st, m * 4 + nd, cost, crosses[st] + crossCost(m, key), h(m));
       }
     }
     return null;
 
-    function relax(from, to, cost, hh) {
-      if (seen[to] === stamp && cost >= g[to]) return;
+    function relax(from, to, cost, nc, hh) {
+      if (seen[to] === stamp && (nc > crosses[to] || (nc === crosses[to] && cost >= g[to]))) return;
       seen[to] = stamp;
       g[to] = cost;
+      crosses[to] = nc;
       prev[to] = from;
-      heap.push(cost + hh, to);
+      heap.push([nc, cost + hh], to);
     }
   }
 }
@@ -461,7 +467,7 @@ function pathD(p, jumps = [], r = 9) {
 }
 
 class MinHeap {
-  constructor() { this.k = []; this.v = []; }
+  constructor(compare = (a, b) => a - b) { this.k = []; this.v = []; this.compare = compare; }
   get size() { return this.k.length; }
   push(key, val) {
     const k = this.k, v = this.v;
@@ -469,7 +475,7 @@ class MinHeap {
     k.push(key); v.push(val);
     while (i > 0) {
       const p = (i - 1) >> 1;
-      if (k[p] <= key) break;
+      if (this.compare(k[p], key) <= 0) break;
       k[i] = k[p]; v[i] = v[p]; i = p;
     }
     k[i] = key; v[i] = val;
@@ -482,8 +488,8 @@ class MinHeap {
       for (;;) {
         let c = 2 * i + 1;
         if (c >= k.length) break;
-        if (c + 1 < k.length && k[c + 1] < k[c]) c++;
-        if (k[c] >= lk) break;
+        if (c + 1 < k.length && this.compare(k[c + 1], k[c]) < 0) c++;
+        if (this.compare(k[c], lk) >= 0) break;
         k[i] = k[c]; v[i] = v[c]; i = c;
       }
       k[i] = lk; v[i] = lv;
@@ -633,7 +639,7 @@ function diagramEdges(tables, boxes) {
     for (const group of byTarget.values()) {
       if (group.length < 2) continue;
       const step = Math.min(8, 22 / (group.length - 1));
-      group.sort((p, q) => p.sy - q.sy);
+      group.sort((p, q) => p.sy - q.sy || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0));
       group.forEach((e, i) => {
         const off = (i - (group.length - 1) / 2) * step;
         e.ty += off;

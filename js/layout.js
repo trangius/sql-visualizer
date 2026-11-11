@@ -132,18 +132,21 @@ function bestSpot(t, placed, dims, edges, anchor = null) {
   return best;
 }
 
-// ─── Auto layout: tables in columns by FK direction ─────────────────────────
-// Referenced tables go right, the tables pointing to them to the left, so arrows run
-// sideways between neighbouring columns (a junction table sits between its two tables).
-// Within a column tables are ordered like their neighbours (fewer crossings) and moved
-// up or down so an FK row lines up with its PK row (straight arrows). Gaps grow with the
-// number of arrows passing through. Finally neighbouring tables in a column are swapped,
-// and lookup tables tucked above or below the table pointing to them, while that gives
-// better arrows as actually drawn, or a block that fits the canvas without zooming out.
-const AUTO = { COL_GAP: 90, ROW_GAP: 50, LANE: 16, COMP_GAP: 120, POLISH_MS: 400, OVERFLOW: 3 };
+// ─── Auto layout ────────────────────────────────────────────────────────────
+// FK columns are a starting point, not a constraint. Try undirected graph layers
+// too, then move tables between columns. Compare actual routes: valid geometry,
+// crossings, ambiguous shared lines, then length/bends/space. A fixed evaluation
+// budget makes the result independent of machine speed.
+const AUTO = { COL_GAP: 90, ROW_GAP: 50, LANE: 16, COMP_GAP: 120, CANDIDATES: 20, ROUNDS: 3, OVERFLOW: 3 };
+const tableOrder = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+const compareLayout = (a, b) => {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+};
 
 function arrangeAll(tables, dims) {
   if (!tables.length) return;
+  tables = [...tables].sort(tableOrder);
   const edges = layoutEdges(tables);
   const old = tables.map(t => pos[t.name]).filter(Boolean);
   if (state.dataView) return moveTo(packTight(tables, dims), old);
@@ -163,9 +166,8 @@ function arrangeAll(tables, dims) {
     }
     groups.push(g);
   }
-  const deadline = performance.now() + AUTO.POLISH_MS;
   const blocks = groups.filter(g => g.length > 1).sort((a, b) => b.length - a.length)
-    .map(g => layoutGroup(g, dims, edges.filter(e => g.includes(e.from)), deadline));
+    .map(g => layoutGroup(g, dims, edges.filter(e => g.includes(e.from))));
   const singles = groups.filter(g => g.length === 1).map(g => g[0]);
 
   // blocks side by side, single tables in rows underneath
@@ -228,7 +230,8 @@ function packTight(tables, dims) {
 }
 
 // Lay out one connected group. Returns { placed: Map table → rect, w, h }.
-function layoutGroup(nodes, dims, edges, deadline) {
+function layoutGroup(nodes, dims, edges) {
+  nodes = [...nodes].sort(tableOrder);
   // parents: the tables t points to. Cycles (A → B → A) are broken for the column choice.
   const parents = new Map(nodes.map(t => [t, new Set()])), children = new Map(nodes.map(t => [t, new Set()]));
   const mark = new Map();
@@ -266,100 +269,80 @@ function layoutGroup(nodes, dims, edges, deadline) {
   const maxLayer = Math.max(...layer.values());
   const cols = Array.from({ length: maxLayer + 1 }, () => []);
   for (const t of nodes) cols[maxLayer - layer.get(t)].push(t); // referenced tables on the right
-  // which column a table is in (kept up to date when the polish moves tables between columns)
-  const colIdx = new Map();
-  const reindex = () => {
-    for (let c = cols.length - 1; c >= 0; c--) if (!cols[c].length) cols.splice(c, 1);
-    cols.forEach((col, c) => col.forEach(t => colIdx.set(t, c)));
+  const links = new Map(nodes.map(t => [t, new Set()]));
+  for (const e of edges) { links.get(e.from).add(e.to); links.get(e.to).add(e.from); }
+  const room = canvasRoom(), aspect = canvasAspect();
+  const score = (p, estimate = false) => {
+    const bb = bboxOf([...p.values()]);
+    const overflow = room ? Math.max(0, bb.w - room.w) + Math.max(0, bb.h - room.h) : 0;
+    const quality = estimate ? estimatedQuality(edges, p) : drawnQuality(nodes, p);
+    quality[3] += AUTO.OVERFLOW * overflow + 0.2 * Math.max(bb.w, bb.h * aspect);
+    return quality;
   };
-  reindex();
-  const colOf = t => colIdx.get(t);
+  const keyOf = cs => JSON.stringify(cs.map(col => col.map(t => t.name)));
+  const place = cs => {
+    const index = new Map(cs.flatMap((col, i) => col.map(t => [t, i])));
+    return placeColumns(cs, t => index.get(t), dims, edges);
+  };
+  const tested = new Set();
+  let bestCols, placed, bestScore;
+  const consider = cs => {
+    cs = cs.filter(col => col.length);
+    const key = keyOf(cs);
+    if (tested.has(key)) return false;
+    tested.add(key);
+    const p = place(cs), q = score(p);
+    if (bestScore && compareLayout(q, bestScore) >= 0) return false;
+    bestCols = cs; placed = p; bestScore = q;
+    return true;
+  };
+  consider(cols);
 
-  // order within columns: barycenter sweeps, keeping the order with the fewest crossings
-  const links = new Map(nodes.map(t => [t, []]));
-  for (const e of edges) if (e.from !== e.to) { links.get(e.from).push(e.to); links.get(e.to).push(e.from); }
-  const crossings = () => {
-    const idx = new Map(cols.flatMap(c => c.map((t, i) => [t, i])));
-    let n = 0;
-    for (let c = 0; c + 1 < cols.length; c++) {
-      const es = edges.filter(e => Math.min(colOf(e.from), colOf(e.to)) === c && Math.abs(colOf(e.from) - colOf(e.to)) === 1)
-        .map(e => colOf(e.from) === c ? [idx.get(e.from) * 1e4 + e.fy, idx.get(e.to) * 1e4 + e.ty] : [idx.get(e.to) * 1e4 + e.ty, idx.get(e.from) * 1e4 + e.fy]);
-      for (let i = 0; i < es.length; i++) for (let j = i + 1; j < es.length; j++) {
-        if ((es[i][0] - es[j][0]) * (es[i][1] - es[j][1]) < 0) n++;
-      }
+  // Starting at different tables allows arrows to run in either direction. For
+  // example A/B both referencing C/D can become A — [C,D] — B without crossings.
+  const roots = nodes.length <= 12 ? nodes : [...nodes].sort((a, b) => links.get(b).size - links.get(a).size || tableOrder(a, b)).slice(0, 4);
+  for (const root of roots) {
+    const visited = new Set([root]), layers = [[root]];
+    while (visited.size < nodes.length) {
+      const next = new Set();
+      for (const t of layers[layers.length - 1]) for (const u of links.get(t)) if (!visited.has(u)) next.add(u);
+      if (!next.size) break;
+      const col = [...next].sort(tableOrder);
+      col.forEach(t => visited.add(t));
+      layers.push(col);
     }
-    return n;
-  };
-  let best = cols.map(c => [...c]), bestN = crossings();
-  for (let it = 0; it < 12 && bestN > 0; it++) {
-    const order = it % 2 ? [...cols.keys()].reverse() : [...cols.keys()];
-    for (const c of order) {
-      const frac = new Map(cols.flatMap(col => col.map((t, i) => [t, (i + .5) / col.length])));
-      const bary = t => {
-        const ns = links.get(t).filter(u => colOf(u) !== c);
-        return ns.length ? ns.reduce((sum, u) => sum + frac.get(u), 0) / ns.length : frac.get(t);
-      };
-      const b = new Map(cols[c].map(t => [t, bary(t)]));
-      cols[c].sort((p, q) => b.get(p) - b.get(q));
-    }
-    const n = crossings();
-    if (n < bestN) { bestN = n; best = cols.map(col => [...col]); }
+    consider(layers);
   }
-  best.forEach((col, i) => { cols[i] = col; });
 
-  const place = () => placeColumns(cols, colOf, dims, edges);
-  let placed = place();
-  // Lookup tables: point nowhere, and only one table points to them (Artist, Label, …).
-  // Such a table may also sit right above or below that one table, in its column: to
-  // leave the gap to the next column to a bigger table (AlbumToArtist → Album), or to
-  // keep the block within the canvas at the current zoom (Course → Teacher on a tall canvas).
-  const referrers = t => new Set(edges.filter(e => e.to === t && e.from !== t).map(e => e.from));
-  const lookups = nodes.filter(t => !edges.some(e => e.from === t && e.to !== t) && referrers(t).size === 1);
-  // polish: try swapping neighbours in a column, and moving lookup tables next to the
-  // table that points to them; keep whatever makes the drawn arrows better
-  if (!state.dataView) {
-    const room = canvasRoom();
-    const overflow = p => { // how far the block sticks out of the canvas, each way
-      if (!room) return 0;
-      const bb = bboxOf([...p.values()]);
-      return Math.max(0, bb.w - room.w) + Math.max(0, bb.h - room.h);
+  // Every table can move, including out of a column it previously joined. Cheap
+  // geometric estimates only shortlist proposals; acceptance always uses routes.
+  for (let round = 0; round < AUTO.ROUNDS; round++) {
+    const candidates = new Map();
+    const propose = cs => {
+      cs = cs.filter(col => col.length);
+      const key = keyOf(cs);
+      if (tested.has(key) || candidates.has(key)) return;
+      candidates.set(key, { cols: cs, quality: score(place(cs), true), key });
     };
-    const costOf = p => drawnCost(nodes, p) + AUTO.OVERFLOW * overflow(p);
-    let cost = costOf(placed);
-    const attempt = change => {
-      const saved = cols.map(col => [...col]);
-      change();
-      reindex();
-      const p = place(), c = costOf(p);
-      if (c < cost) { cost = c; placed = p; return true; }
-      cols.length = 0;
-      cols.push(...saved);
-      colIdx.clear();
-      reindex();
-      return false;
-    };
-    for (let round = 0; round < 3 && performance.now() < deadline; round++) {
-      let better = false;
-      for (const t of lookups) {
-        const [child] = referrers(t);
-        if (colOf(t) === colOf(child)) continue;
-        for (const below of [false, true]) {
-          if (performance.now() >= deadline) break;
-          const moved = attempt(() => {
-            cols[colOf(t)].splice(cols[colOf(t)].indexOf(t), 1);
-            const col = cols[colOf(child)];
-            col.splice(col.indexOf(child) + (below ? 1 : 0), 0, t);
-          });
-          if (moved) { better = true; break; }
+    for (const t of nodes) {
+      const rest = bestCols.map(col => col.filter(u => u !== t)).filter(col => col.length);
+      for (let c = 0; c < rest.length; c++) {
+        for (let i = 0; i <= rest[c].length; i++) {
+          const cs = rest.map(col => [...col]);
+          cs[c].splice(i, 0, t);
+          propose(cs);
         }
       }
-      for (let c = 0; c < cols.length; c++) {
-        for (let i = 0; i + 1 < cols[c].length && performance.now() < deadline; i++) {
-          if (attempt(() => { const col = cols[c]; [col[i], col[i + 1]] = [col[i + 1], col[i]]; })) better = true;
-        }
+      for (let c = 0; c <= rest.length; c++) {
+        const cs = rest.map(col => [...col]);
+        cs.splice(c, 0, [t]);
+        propose(cs);
       }
-      if (!better) break;
     }
+    const shortlist = [...candidates.values()].sort((a, b) => compareLayout(a.quality, b.quality) || (a.key < b.key ? -1 : 1));
+    let better = false;
+    for (const candidate of shortlist.slice(0, AUTO.CANDIDATES)) if (consider(candidate.cols)) better = true;
+    if (!better) break;
   }
   const bb = bboxOf([...placed.values()]);
   for (const r of placed.values()) { r.x -= bb.x; r.y -= bb.y; }
@@ -378,60 +361,53 @@ function placeColumns(cols, colOf, dims, edges) {
   let x = 0;
   cols.forEach((col, c) => {
     xs[c] = x;
-    x += Math.max(0, ...col.map(t => dims.get(t).w)) + AUTO.COL_GAP + AUTO.LANE * through[c];
+    x += Math.ceil((Math.max(0, ...col.map(t => dims.get(t).w)) + AUTO.COL_GAP + AUTO.LANE * through[c]) / 10) * 10;
   });
   const y = new Map();
   for (const col of cols) {
     let top = 0;
-    for (const t of col) { y.set(t, top); top += dims.get(t).h + AUTO.ROW_GAP; }
+    for (const t of col) { y.set(t, top); top += Math.ceil((dims.get(t).h + AUTO.ROW_GAP) / 10) * 10; }
   }
-  // relax: each table moves toward where its arrows would be level
-  const off = new Map(); // table → [{ other, dy }] with dy = the y difference that makes an arrow level
-  for (const t of y.keys()) off.set(t, []);
+  // Minimise vertical connection length with the column order held fixed.
+  // A median minimises the sum of absolute distances. Clamp to the free interval
+  // between neighbours; never shift a whole column to repair one overlap.
+  // Same-column links still contribute length, keeping leaves near their parent.
+  const off = new Map([...y.keys()].map(t => [t, []]));
   for (const e of edges) {
-    if (e.from === e.to || colOf(e.from) === colOf(e.to)) continue; // same column: can't be level
+    if (e.from === e.to) continue;
     off.get(e.from).push({ other: e.to, dy: e.ty - e.fy });
     off.get(e.to).push({ other: e.from, dy: e.fy - e.ty });
   }
-  for (let it = 0; it < 16; it++) {
+  const nearestMedian = (values, current) => {
+    if (!values.length) return current;
+    values.sort((a, b) => a - b);
+    return Math.max(values[Math.floor((values.length - 1) / 2)], Math.min(current, values[Math.floor(values.length / 2)]));
+  };
+  for (let it = 0; it < 64; it++) {
+    let changed = false;
     const order = it % 2 ? [...cols].reverse() : cols;
     for (const col of order) {
-      const want = col.map(t => {
-        const o = off.get(t);
-        return o.length ? o.reduce((sum, { other, dy }) => sum + y.get(other) + dy, 0) / o.length : y.get(t);
-      });
-      // keep the order and gaps, then shift the column to be as close to what it wants as it can
-      const got = [];
-      col.forEach((t, i) => { got[i] = i ? Math.max(want[i], got[i - 1] + dims.get(col[i - 1]).h + AUTO.ROW_GAP) : want[i]; });
-      const shift = got.reduce((sum, g, i) => sum + want[i] - g, 0) / col.length;
-      col.forEach((t, i) => y.set(t, got[i] + Math.min(0, shift)));
+      // Moving an entire column preserves its gaps and its internal edge lengths.
+      const offsets = col.flatMap(t => off.get(t).filter(o => colOf(o.other) !== colOf(t))
+        .map(o => y.get(o.other) + o.dy - y.get(t)));
+      const shift = snap(nearestMedian(offsets, 0));
+      if (shift) { col.forEach(t => y.set(t, y.get(t) + shift)); changed = true; }
+      const indices = [...col.keys()];
+      if (it % 2) indices.reverse();
+      for (const i of indices) {
+        const t = col[i], old = y.get(t);
+        const lo = i ? Math.ceil((y.get(col[i - 1]) + dims.get(col[i - 1]).h + AUTO.ROW_GAP) / 10) * 10 : -Infinity;
+        const hi = i + 1 < col.length ? Math.floor((y.get(col[i + 1]) - dims.get(t).h - AUTO.ROW_GAP) / 10) * 10 : Infinity;
+        const want = nearestMedian(off.get(t).map(o => y.get(o.other) + o.dy), old);
+        const next = Math.max(lo, Math.min(hi, snap(want)));
+        if (next !== old) { y.set(t, next); changed = true; }
+      }
     }
+    if (!changed) break;
   }
-  // last pass, right to left: line each table's first arrow up exactly with a table already
-  // placed to its right (so that arrow is straight), as far as the column's spacing allows
-  const done = new Set();
-  for (let c = cols.length - 1; c >= 0; c--) {
-    const col = cols[c];
-    const want = col.map(t => {
-      const o = off.get(t).find(({ other }) => done.has(other));
-      return o ? y.get(o.other) + o.dy : snap(y.get(t));
-    });
-    col.forEach((t, i) => {
-      const min = i ? y.get(col[i - 1]) + dims.get(col[i - 1]).h + AUTO.ROW_GAP : -Infinity;
-      y.set(t, Math.max(want[i], snap(min + 9)));
-    });
-    col.forEach(t => done.add(t));
-  }
-  // and left to right: a table none of whose arrows is straight moves to make one straight,
-  // if that fits between its neighbours in the column
-  const level = t => off.get(t).some(({ other, dy }) => y.get(t) === y.get(other) + dy);
-  cols.forEach(col => col.forEach((t, i) => {
-    if (!off.get(t).length || level(t)) return;
-    const lo = i ? y.get(col[i - 1]) + dims.get(col[i - 1]).h + AUTO.ROW_GAP : -Infinity;
-    const hi = i + 1 < col.length ? y.get(col[i + 1]) - AUTO.ROW_GAP - dims.get(t).h : Infinity;
-    const fit = off.get(t).map(({ other, dy }) => y.get(other) + dy).find(v => v >= lo && v <= hi);
-    if (fit !== undefined) y.set(t, fit);
-  }));
+  // Normalise before routing, on the same grid used by the final positions.
+  const top = Math.min(...y.values());
+  for (const [t, v] of y) y.set(t, v - top);
   const placed = new Map();
   cols.forEach((col, c) => col.forEach(t => placed.set(t, { x: xs[c], y: y.get(t), ...dims.get(t) })));
   return placed;
@@ -445,24 +421,48 @@ function sharedLength([[ax, ay], [bx, by]], [[cx, cy], [dx, dy]]) {
   return 0;
 }
 
-// How the arrows come out when actually routed: jumps count most, then total length
-function drawnCost(nodes, placed) {
-  const boxes = new Map(nodes.map(t => [t, { ...placed.get(t), rows: [] }]));
-  const edges = diagramEdges(nodes, boxes);
-  if (!edges.length) return 0;
-  routeEdges(edges, [...boxes.values()]);
-  let cost = 0;
-  const segs = edges.map(e => e.points.slice(1).map((q, i) => [e.points[i], q]));
-  for (const [k, e] of edges.entries()) {
-    cost += (e.jumps ?? 0) * 1000;
-    for (const [p, q] of segs[k]) cost += Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]);
-    // arrows to different rows running along the same line look like one arrow: very bad
+// Score geometric intersections, not the decorative jump arcs (which omit
+// crossings near corners). Shared routes to the same target are intentional.
+function routeQuality(edges, boxes) {
+  let invalid = 0, crossings = 0, shared = 0, length = 0, bends = 0;
+  const segs = edges.map(e => {
+    const points = simplify(e.points);
+    bends += Math.max(0, points.length - 2);
+    return points.slice(1).map((q, i) => [points[i], q]);
+  });
+  for (let k = 0; k < edges.length; k++) {
+    for (const [p, q] of segs[k]) {
+      length += Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]);
+      for (const box of boxes) if (segHitsRect([...p, ...q], box)) invalid++;
+    }
     for (let j = k + 1; j < edges.length; j++) {
-      if (edges[j].to === e.to) continue;
-      for (const s of segs[k]) for (const u of segs[j]) cost += 40 * sharedLength(s, u);
+      const hits = new Set();
+      for (const s of segs[k]) for (const u of segs[j]) {
+        if (edges[k].to !== edges[j].to) shared += sharedLength(s, u);
+        const sh = s[0][1] === s[1][1], uh = u[0][1] === u[1][1];
+        if (sh === uh || !segsCross(s.flat(), u.flat())) continue;
+        const [h, v] = sh ? [s, u] : [u, s];
+        hits.add(v[0][0] + ',' + h[0][1]);
+      }
+      crossings += hits.size;
     }
   }
-  return cost;
+  return [invalid, crossings, shared, length + ROUTE.BEND * bends];
+}
+
+function drawnQuality(nodes, placed) {
+  const boxes = new Map(nodes.map(t => [t, { ...placed.get(t), rows: [] }]));
+  const edges = diagramEdges(nodes, boxes);
+  routeEdges(edges, [...boxes.values()]);
+  return routeQuality(edges, [...boxes.values()]);
+}
+
+function estimatedQuality(edges, placed) {
+  const routes = edges.map(e => {
+    const r = estimateRoute(placed.get(e.from), e.fy, placed.get(e.to), e.ty);
+    return { to: e.to.name + ':' + e.ty, points: [[r.segs[0][0], r.segs[0][1]], ...r.segs.map(s => [s[2], s[3]])] };
+  });
+  return routeQuality(routes, [...placed.values()]);
 }
 
 // Which tables t is connected to; when this changes, a floating table is placed again

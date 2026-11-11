@@ -71,6 +71,9 @@ The **Syntax** button in the app has the same reference.
 
 Open `index.html` in your browser. No installation or build step needed.
 
+Run `node test/layout-check.js` to check layout and routing, including crossings,
+table spacing, declaration order, canvas sizes, and relationship notations.
+
 ## Screenshots
 
 <table>
