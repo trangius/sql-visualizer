@@ -16,6 +16,16 @@ const DEFAULT_VC = 128;
 const INT_TYPES = new Set(['int', 'integer', 'bigint', 'smallint', 'mediumint', 'tinyint']);
 const problem = (line, msg, level = 'error') => ({ line, msg, level });
 const snap = v => Math.round(v / 10) * 10; // the diagram's 10px grid
+// Two names in the order of their UTF-8 bytes, which is the order of their code points (not of
+// JavaScript's UTF-16 units: those put a name beyond the BMP before one in U+E000…U+FFFF)
+function byBytes(a, b) {
+  for (let i = 0; i < a.length && i < b.length;) {
+    const p = a.codePointAt(i), q = b.codePointAt(i);
+    if (p !== q) return p - q;
+    i += p > 0xffff ? 2 : 1;
+  }
+  return a.length - b.length;
+}
 // Where a line's # comment starts, -1 for none. A # inside 'quotes' is text: [default '#fff']
 function commentAt(line) {
   const code = line.match(/^(?:[^#']|'(?:[^']|'')*'?)*/)[0];

@@ -8,7 +8,7 @@
 // runs the same layout, gets the same golden file.
 const assert = require('assert/strict'), fs = require('fs'), path = require('path');
 const api = require('./layout-load')();
-const corpus = require('./layout-corpus')(api.EXAMPLES), { scrambled } = require('./layout-corpus');
+const corpus = require('./layout-corpus')(api.EXAMPLES), { scrambled, moved } = require('./layout-corpus');
 const FUZZ = process.argv.includes('--fuzz') ? +process.argv[process.argv.indexOf('--fuzz') + 1] : 120;
 const GOLDEN = path.join(__dirname, 'fixtures/layout_golden.txt');
 const BOX_W = 190, boxH = t => 50 + 30 * api.shownCols(t).length;
@@ -32,9 +32,21 @@ function draw(nodes, dims) {
   const layoutMs = ms(started);
   const boxes = new Map(nodes.map(t => [t, { ...api.pos[t.name], ...dims.get(t) }]));
   started = process.hrtime.bigint();
-  const edges = api.diagramEdges(nodes, boxes), searched = api.routeEdges(edges, [...boxes.values()]);
+  const edges = api.diagramEdges(nodes, boxes), { searched } = api.routeEdges(edges, [...boxes.values()]);
   checks++;
   return { nodes, boxes, edges, searched, layoutMs, routeMs: ms(started) };
+}
+// The routes again, for the tables where they stand now (dragged there by the test); before:
+// what the last call for the same tables kept, to go on from
+function reroute(r, before = null) {
+  const boxes = new Map(r.nodes.map(t => [t, { ...api.pos[t.name], w: r.boxes.get(t).w, h: r.boxes.get(t).h }])), edges = api.diagramEdges(r.nodes, boxes);
+  return { nodes: r.nodes, boxes, edges, ...api.routeEdges(edges, [...boxes.values()], null, before) };
+}
+// ...call after call, as the page does frame after frame, until no arrow waits for its search
+function settle(r) {
+  let q = reroute(r), calls = 1;
+  for (; q.waiting; calls++) q = reroute(r, q.kept);
+  return { ...q, calls };
 }
 function run(src, { aspect = 1.5, notation = 'arrows', keysOnly = false, measured = false } = {}) {
   Object.assign(api.canvas, { width: 1000 * aspect, height: 1000 });
@@ -167,6 +179,16 @@ for (const { name, text, limit, crosses } of corpus) {
     golden.push([name, m.tables, m.lines, m.crossings, m.bends, m.length, m.longest, m.width, m.height, spotsHash(r)].join(' '));
   }
 }
+// And one arranged by hand, so the golden file covers the arrows that are searched for: shop,
+// moved as layout-corpus.js says, routed until no arrow waits. That is what a search without
+// a limit finds (checked further down), so its line does not depend on how work is counted.
+{
+  const r = run(corpus.find(s => s.name === 'shop').text);
+  for (const [name, x, y] of moved(spots(r))) api.pos[name] = { x, y };
+  const q = settle(r), m = validate(q, 'shop_moved');
+  assert(q.searched > 10, 'shop_moved: hardly an arrow is searched for');
+  golden.push(['shop_moved', m.tables, m.lines, m.crossings, m.bends, m.length, m.longest, m.width, m.height, spotsHash(q)].join(' '));
+}
 if (process.argv.includes('--write')) fs.writeFileSync(GOLDEN, golden.join('\n') + '\n');
 else assert.equal(golden.join('\n') + '\n', fs.readFileSync(GOLDEN, 'utf8'), 'the layout changed: compare with test/fixtures/layout_golden.txt, then --write');
 
@@ -197,9 +219,9 @@ run('');
 const box = (x, y, w = 190, h = 110) => ({ x, y, w, h });
 function route(boxes, links) {
   const edges = links.map(([from, to, fromRow = 0, toRow = 0]) => ({
-    a: boxes[from], b: boxes[to], sy: boxes[from].y + 59 + 30 * fromRow, ty: boxes[to].y + 59 + 30 * toRow, row: boxes[to].y + 59 + 30 * toRow, from: `${from}.${fromRow}`, to: `${to}.${toRow}`,
+    a: boxes[from], b: boxes[to], sy: boxes[from].y + 59 + 30 * fromRow, ty: boxes[to].y + 59 + 30 * toRow, row: boxes[to].y + 59 + 30 * toRow, fromTable: from, from: `${from}.${fromRow}`, to: `${to}.${toRow}`,
   }));
-  const r = { boxes: new Map(Object.entries(boxes)), edges, searched: api.routeEdges(edges, Object.values(boxes)) };
+  const r = { boxes: new Map(Object.entries(boxes)), edges, ...api.routeEdges(edges, Object.values(boxes)) };
   validate(r, 'router');
   return r;
 }
@@ -226,6 +248,12 @@ function route(boxes, links) {
 {
   const r = route({ A: box(0, 0), B: box(280, 0), C: box(340, 160), D: box(620, 0) }, [['A', 'B'], ['A', 'C', 1], ['C', 'D', 1], ['C', 'B', 2]]);
   assert.equal(r.searched, 0);
+}
+// one table dragged onto another, an arrow's two ends in one place: it still has a path to draw
+{
+  const boxes = [box(0, 0), box(0, 0)], edges = [{ a: boxes[0], b: boxes[1], sy: 59, ty: 59, row: 59, fromTable: 'A', from: 'A.0', to: 'B.0' }];
+  api.routeEdges(edges, boxes);
+  assert(api.simplify(edges[0].points).length >= 2 && !/NaN|Infinity|undefined/.test(edges[0].d));
 }
 // two groups in one channel, and two self-references facing each other: one track each
 route({ A: box(0, 0, 190, 140), B: box(280, 300, 190, 140), C: box(0, 190, 190, 140), D: box(280, 490, 190, 140) }, [['A', 'B', 1], ['C', 'D', 1]]);
@@ -281,7 +309,7 @@ for (const name of ['rental', 'shop', 'store', 'four', 'school']) {
   api.ensurePositions(nodes, dims(nodes));
   assert(ms(started) < 500, `a new table took ${ms(started).toFixed(0)} ms to place`);
   const boxes = new Map(nodes.map(t => [t, { ...api.pos[t.name], ...dims(nodes).get(t) }])), edges = api.diagramEdges(nodes, boxes);
-  assert.equal(api.routeEdges(edges, [...boxes.values()]), 0, 'a new table stands out of line');
+  assert.equal(api.routeEdges(edges, [...boxes.values()]).searched, 0, 'a new table stands out of line');
   validate({ boxes, edges }, 'a new table');
 }
 
@@ -290,10 +318,6 @@ for (const name of ['rental', 'shop', 'store', 'four', 'school']) {
 {
   let seed = 12345;
   const pick = n => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed % n; };
-  const rerouted = r => {
-    const boxes = new Map(r.nodes.map(t => [t, { ...api.pos[t.name], w: r.boxes.get(t).w, h: r.boxes.get(t).h }])), edges = api.diagramEdges(r.nodes, boxes);
-    return { boxes, edges, searched: api.routeEdges(edges, [...boxes.values()]) };
-  };
   for (const name of ['rental', 'shop', 'store', 'heights40']) {
     const { text } = corpus.find(s => s.name === name);
     for (let trial = 0; trial < FUZZ / 2; trial++) {
@@ -309,43 +333,63 @@ for (const name of ['rental', 'shop', 'store', 'four', 'school']) {
           api.pos[t.name] = was;
         }
       }
-      const q = rerouted(r), m = metrics(q);
+      const q = settle(r), m = metrics(q);
       assert.equal(m.overlaps + m.hits, 0, `${name}, drag ${trial}: a line through a table`);
       for (const e of q.edges) assert(!/NaN|Infinity/.test(e.d), `${name}, drag ${trial}: invalid SVG`);
     }
     const r = run(text);
     for (const t of r.nodes) api.pos[t.name] = { x: api.pos[t.name].x + pick(5) * 10 - 20, y: api.pos[t.name].y };
-    assert.equal(rerouted(r).searched, 0, `${name}: tables nudged sideways are no columns any more`);
+    assert.equal(reroute(r).searched, 0, `${name}: tables nudged sideways are no columns any more`);
   }
 }
 // Every table moved: more arrows to search for than one call may (its work is counted, not
-// timed). The same boxes still get the same routes every time, all of them drawable.
+// timed). The same boxes get the same routes every time, all of them drawable; and call after
+// call, each given what the last kept, they become the routes a search without a limit finds.
 {
   let seed = 11;
   const pick = n => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed % n; };
+  const points = q => q.edges.map(e => e.points);
   for (const name of ['shop', 'star50', 'islands120', 'star300']) {
-    const r = run(corpus.find(s => s.name === name).text), routes = [];
+    const r = run(corpus.find(s => s.name === name).text), work = api.ROUTE.WORK;
     for (const t of r.nodes) api.pos[t.name] = { x: api.pos[t.name].x + (pick(21) - 10) * 10, y: api.pos[t.name].y + (pick(21) - 10) * 10 };
-    for (let again = 0; again < 2; again++) {
-      const boxes = new Map(r.nodes.map(t => [t, { ...api.pos[t.name], w: BOX_W, h: boxH(t) }])), edges = api.diagramEdges(r.nodes, boxes);
-      assert(api.routeEdges(edges, [...boxes.values()]) > 0);
-      for (const e of edges) assert(!/NaN|Infinity/.test(e.d) && e.points.every((p, i) => !i || p[0] === e.points[i - 1][0] || p[1] === e.points[i - 1][1]), `${name}: a route that cannot be drawn`);
-      routes.push(edges.map(e => e.points));
-    }
-    assert.deepEqual(routes[1], routes[0], `${name}: the same boxes, other routes`);
+    const once = reroute(r), settled = settle(r);
+    assert(once.searched > 0);
+    for (const e of once.edges) assert(!/NaN|Infinity/.test(e.d) && e.points.every((p, i) => !i || p[0] === e.points[i - 1][0] || p[1] === e.points[i - 1][1]), `${name}: a route that cannot be drawn`);
+    assert.deepEqual(points(reroute(r)), points(once), `${name}: the same boxes, other routes`);
+    api.ROUTE.WORK = Infinity;
+    assert.deepEqual(points(settled), points(reroute(r)), `${name}: after ${settled.calls} calls, not the routes of a search without a limit`);
+    api.ROUTE.WORK = work;
   }
+  // A big one arranged by hand, no table on another: hundreds of arrows to search for, so most
+  // wait at first, but no line runs through a table, after the first call or the last
+  {
+    const r = run(corpus.find(s => s.name === 'random300x3').text);
+    for (const [name, x, y] of moved(spots(r))) api.pos[name] = { x, y };
+    const once = reroute(r), settled = settle(r);
+    assert(once.waiting > 100 && settled.calls > 3);
+    for (const q of [once, settled]) assert.equal(metrics(q).overlaps + metrics(q).hits, 0, 'random300x3 moved: a line through a table');
+  }
+  // the golden file's moved diagram at a tenth of the work: more calls, the same routes
+  const r = run(corpus.find(s => s.name === 'shop').text), work = api.ROUTE.WORK;
+  for (const [name, x, y] of moved(spots(r))) api.pos[name] = { x, y };
+  const whole = points(settle(r));
+  api.ROUTE.WORK = work / 10;
+  const slow = settle(r);
+  api.ROUTE.WORK = work;
+  assert(slow.calls > 1);
+  assert.deepEqual(points(slow), whole, 'shop_moved: other routes when the work is split over more calls');
 }
 // While a table is dragged, the arrows of the others keep the routes they were given, even
 // with the dragged table on them; when it is dropped they are searched for again
 {
   const boxes = { A: box(0, 0), out: box(200, 0), B: box(500, 120), held: box(900, 0, 40, 60) }; // `out` is too close to A for a column of its own
-  const arrow = () => [{ a: boxes.out, b: boxes.B, sy: 59, ty: 179, row: 179, from: 'out.0', to: 'B.0' }];
-  const first = arrow(), dragged = arrow(), dropped = arrow();
-  assert.equal(api.routeEdges(first, Object.values(boxes)), 1);
+  const arrow = () => [{ a: boxes.out, b: boxes.B, sy: 59, ty: 179, row: 179, fromTable: 'out', from: 'out.0', to: 'B.0' }];
+  const first = arrow(), dragged = arrow(), dropped = arrow(), before = api.routeEdges(first, Object.values(boxes));
+  assert.equal(before.searched, 1);
   Object.assign(boxes.held, { x: first[0].points[2][0] - 20, y: 90 });
-  api.routeEdges(dragged, Object.values(boxes), new Set([boxes.held]));
+  const during = api.routeEdges(dragged, Object.values(boxes), new Set([boxes.held]), before.kept);
   assert.deepEqual(dragged[0].points, first[0].points, 'an arrow of tables that were not dragged was searched for again');
-  api.routeEdges(dropped, Object.values(boxes));
+  api.routeEdges(dropped, Object.values(boxes), null, during.kept);
   validate({ boxes: new Map(Object.entries(boxes)), edges: dropped }, 'after a drop');
 }
 console.log(`Layout checks passed (${checks} layouts).`);

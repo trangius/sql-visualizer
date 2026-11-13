@@ -100,6 +100,7 @@ module.exports = examples => [
   { name: 'store', text: examples.store, limit: 20 },
   { name: 'shop', text: fixture('shop'), limit: 20, crosses: true },
   { name: 'selfref', text: 'A\n  Id\n  ParentId -> A', limit: 20 },
+  { name: 'ownrow', text: 'A\n  Id -> A', limit: 20 }, // a column that references itself: an arrow of no length
   { name: 'mutual', text: 'A\n  Id\n  BId -> B\nB\n  Id\n  AId -> A', limit: 20 },
   { name: 'loose', text: 'A\n  Id\nB\n  Id\nC\n  Id\n  AId -> A', limit: 20 },
   { name: 'names', text: names, limit: 20 },
@@ -121,3 +122,10 @@ module.exports = examples => [
   { name: 'random1500x3', text: scattered(1500, 3, 7), limit: 1000, crosses: true },
 ];
 module.exports.scrambled = scrambled;
+// A diagram arranged by hand, whose arrows have to be searched for: the spots Auto layout
+// gave ([name, x, y] from the top-left, in name order) three times as far apart, and every
+// table then moved by a random -150…150 (in tens) in x, then in y
+module.exports.moved = spots => {
+  const r = random(9);
+  return spots.map(([name, x, y]) => [name, 3 * x + (r.pick(31) - 15) * 10, 3 * y + (r.pick(31) - 15) * 10]);
+};

@@ -166,16 +166,7 @@ const AUTO = {
   MOVE_BUDGET: 2e6,
   NEW_BATCH: 8,                                   // more new tables than this at once are laid out as a block
 };
-// Names in the order of their UTF-8 bytes, which is the order of their code points (not of
-// JavaScript's UTF-16 units: those put a name beyond the BMP before one in U+E000…U+FFFF)
-function tableOrder(a, b) {
-  for (let i = 0; i < a.name.length && i < b.name.length;) {
-    const p = a.name.codePointAt(i), q = b.name.codePointAt(i);
-    if (p !== q) return p - q;
-    i += p > 0xffff ? 2 : 1;
-  }
-  return a.name.length - b.name.length;
-}
+const tableOrder = (a, b) => byBytes(a.name, b.name);
 const gridUp = v => Math.ceil(v / AUTO.GRID) * AUTO.GRID;
 // Math.sqrt alone can be one off for a big number; other implementations must get the same
 function isqrt(v) {

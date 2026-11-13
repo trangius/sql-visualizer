@@ -247,20 +247,25 @@ const ROUTE = {
   GAP_TRIES: 8, SIDE_DETOUR: 400, BUDGET: 2e6, ORDER_MAX: 48,
   // the search:
   GAP: 30, MARGIN: 10, GRID: 10, BEND: 40, CROSS: 250, SHARE_OTHER: 60, MERGE: 0.5,
-  WINDOW: 200, STEPS: 2e5, CELLS: 2e6, WORK: 5e5,
+  WINDOW: 200, STEPS: 5e4, CELLS: 1e5, WORK: 5e5, // one search's steps and grid; one call's work
 };
 
 // Routes every arrow (edge.points, and edge.d with the hops over other lines). An edge is
-// { a, b, sy, ty, row, from, to }: its two boxes, the heights it leaves and ends at, the
-// height of the row it points to (ty moves off it where a notation spreads the ends) and
-// the two rows' names. held: the boxes being dragged, if any (see searchRoutes).
-// Returns how many arrows had to be searched for.
-function routeEdges(edges, boxes, held = null) {
-  if (!edges.length) return 0;
+// { a, b, sy, ty, row, fromTable, from, to }: its two boxes, the heights it leaves and ends
+// at, the height of the row it points to (ty moves off it where a notation spreads the
+// ends), its table's name and the two rows' names. Arrows alike in everything else go by
+// table name, then row. held: the boxes being dragged, if any (see searchRoutes).
+// Returns { searched, waiting, kept }: how many arrows the columns could not serve, how many
+// of those still wait for their search, and what to pass as `before` to the next call. One
+// call searches for as many as its work allows and gives the rest a detour; called again
+// with the same boxes and arrows it goes on with those, until none waits. The routes are
+// then the ones a search without a limit would have found at once.
+function routeEdges(edges, boxes, held = null, before = null) {
+  if (!edges.length) return { searched: 0, waiting: 0, kept: null };
   const searched = routeGroups(edges, boxes).flatMap(g => routeGroup(g.arrows, g.boxes));
-  searchRoutes(searched, edges, boxes, held);
+  const kept = searchRoutes(searched, edges, boxes, held, before);
   addJumps(edges);
-  return searched.length;
+  return { searched: searched.length, waiting: kept.waiting, kept };
 }
 
 // R1: tables joined by arrows are routed together, on columns of their own. So are groups
@@ -486,7 +491,7 @@ function routeGroup(arrows, members) {
   // Not those of an obstacle: they are searched for.
   const inLine = e => colOf.has(e.a) && colOf.has(e.b);
   const span = e => e.a === e.b ? Infinity : Math.abs(e.a.x - e.b.x) + Math.abs(e.sy - e.row);
-  const order = arrows.filter(inLine).sort((p, q) => span(p) - span(q) || p.a.x - q.a.x || p.sy - q.sy || p.b.x - q.b.x || p.row - q.row || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0));
+  const order = arrows.filter(inLine).sort((p, q) => span(p) - span(q) || p.a.x - q.a.x || p.sy - q.sy || p.b.x - q.b.x || p.row - q.row || byBytes(p.fromTable, q.fromTable));
   const lineOf = new Map(), plans = [], sides = new Map(members.map(b => [b, [0, 0]])); // sides: how many lines a box has to tables on its left, on its right
   for (const e of order) if (!lineOf.has(e.to)) lineOf.set(e.to, lineOf.size);
   for (const e of arrows) {
@@ -714,36 +719,53 @@ function chooseSides(e, side = null) {
 // A cell's cost counts only if it was set in the current search (seen === stamp), so the
 // arrays don't have to be cleared before each search.
 const routeBuf = { g: new Float64Array(0), prev: new Int32Array(0), seen: new Uint32Array(0), stamp: 0 };
-// The routes the last call searched for (by FK row, with where its boxes stood): while tables
-// are dragged, only the arrows that changed are searched for again
-let searchedLast = new Map();
 
 // The arrows the columns can't serve: A* on a grid of the box edges and rows in a window
 // around the arrow's two tables. A bend costs, crossing a line already drawn costs more, and
 // running along a line to another row is very expensive (it would look like it points
 // there); along one to the same row is cheap (they merge, drawn thicker).
-// The dragged tables' arrows go first, then the shortest. When the work allowed for one
-// call is done (WORK: boxes and lines looked at, grid cells, steps; counted, not timed, so
-// the same boxes always get the same routes), or there is no way, an arrow gets a plain
-// detour instead.
-function searchRoutes(arrows, edges, boxes, held) {
-  if (!arrows.length) return;
-  const last = searchedLast, pending = new Set(arrows), lineOf = new Map(), byX = [...boxes].sort((p, q) => p.x - q.x);
+// The arrows go shortest first. When the work allowed for one call is done (WORK, counted,
+// not timed, so the same boxes always get the same routes), the rest get a plain detour and
+// wait: the next call, given what this one returns (the routes by FK row, and for which
+// boxes and arrows they are), keeps the routes found and goes on with those that wait, in
+// the same order and with the same lines around them as a search without a limit. An arrow
+// with no way at all keeps its detour. A search's work is what is in its window (boxes,
+// stretches of drawn lines, grid cells) and its steps: as many arrows are searched for in a
+// big diagram as in a small one.
+// While tables are dragged (held) their arrows go first, and the others keep the routes they
+// had as long as their own two tables stand where they stood; when the drag ends, all start over.
+function searchRoutes(arrows, edges, boxes, held, before) {
+  const kept = { input: '', held: !!held, routes: new Map(), waiting: 0 };
+  if (!arrows.length) return kept;
+  const place = new Map(boxes.map((b, i) => [b, i])), pending = new Set(arrows), lineOf = new Map(), byX = [...boxes].sort((p, q) => p.x - q.x);
+  kept.input = boxes.map(b => [b.x, b.y, b.w, b.h]).join(';') + '|' + edges.map(e => [e.from, e.to, place.get(e.a), place.get(e.b), e.sy, e.ty, e.row]).join(';');
+  const going = !held && before && !before.held && before.input === kept.input; // the same boxes and arrows as last time: go on
+  // What a search looks through, kept in order so that it finds what is in its window without
+  // looking at everything: the boxes by x, the lines already drawn as level stretches by y
+  // and upright ones by x, and those this call adds as they come
+  const there = { byX, widest: boxes.reduce((w, b) => Math.max(w, b.w), 0), level: [], upright: [], added: [] };
+  const draw = (e, lists) => e.points.forEach((q, i) => {
+    if (!i) return;
+    const [ax, ay] = e.points[i - 1], [bx, by] = q, line = lineOf.get(e.to);
+    (lists[ay === by ? 0 : 1]).push(ay === by ? { at: ay, a: Math.min(ax, bx), b: Math.max(ax, bx), line, level: true } : { at: ax, a: Math.min(ay, by), b: Math.max(ay, by), line, level: false });
+  });
   let work = ROUTE.WORK;
-  searchedLast = new Map();
   for (const e of edges) if (!lineOf.has(e.to)) lineOf.set(e.to, lineOf.size + 1);
   const where = e => [e.a.x, e.a.y, e.a.w, e.a.h, e.b.x, e.b.y, e.b.w, e.b.h, e.sy, e.ty].join();
   const isHeld = e => held?.has(e.a) || held?.has(e.b) ? 1 : 0, todo = [];
   for (const e of arrows) {
     chooseSides(e);
-    const was = held && !isHeld(e) && last.get(e.from);
-    if (was?.where !== where(e)) { todo.push(e); continue; }
+    const was = before?.routes.get(e.from);
+    if (!(going ? was?.done : held && !isHeld(e) && was?.where === where(e))) { todo.push(e); continue; }
     e.points = was.points;
-    searchedLast.set(e.from, was);
+    kept.routes.set(e.from, was);
     pending.delete(e);
   }
+  for (const e of edges) if (!pending.has(e)) draw(e, [there.level, there.upright]);
+  there.level.sort((p, q) => p.at - q.at);
+  there.upright.sort((p, q) => p.at - q.at);
   const len = e => e.a === e.b ? Infinity : Math.abs(e.sx - e.tx) + Math.abs(e.sy - e.ty);
-  for (const e of todo.sort((p, q) => isHeld(q) - isHeld(p) || len(p) - len(q) || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0))) {
+  for (const e of todo.sort((p, q) => isHeld(q) - isHeld(p) || len(p) - len(q) || byBytes(p.fromTable, q.fromTable) || p.sy - q.sy)) {
     // a self-reference can loop around either side: both are tried, the cheaper one wins
     const sides = e.a !== e.b ? [e] : ['L', 'R'].map(side => {
       const v = { ...e };
@@ -751,7 +773,7 @@ function searchRoutes(arrows, edges, boxes, held) {
       return v;
     });
     let best = null;
-    const grid = work > 0 && searchGrid(e, sides, edges, boxes, pending, lineOf);
+    const grid = work > 0 && searchGrid(e, sides, there, pending, lineOf.get(e.to));
     pending.delete(e);
     work -= grid ? grid.work : 0;
     if (grid?.blocked) for (const v of sides) {
@@ -762,38 +784,47 @@ function searchRoutes(arrows, edges, boxes, held) {
     if (best) {
       for (const k of ['x1', 'x2', 'outDir', 'inDir', 'sx', 'tx']) e[k] = best.v[k];
       e.points = [[e.x1, e.sy], ...best.nodes.map(n => [grid.xs[n % grid.nx], grid.ys[Math.floor(n / grid.nx)]]), [e.x2, e.ty]];
-    } else e.points = detour(e, byX);
-    searchedLast.set(e.from, { where: where(e), points: e.points });
+    } else e.points = detour(e, there);
+    draw(e, [there.added, there.added]);
+    kept.routes.set(e.from, { where: where(e), points: e.points, done: !!grid }); // done: searched for, whatever came of it
+    if (!grid) kept.waiting++;
   }
+  return kept;
 }
 
-// An arrow without the search: the elbow if that touches no box, else over or under the
-// boxes between its two tables; the one of the three that touches fewest boxes.
-// byX: the boxes sorted by x.
-function detour(e, byX) {
+// An arrow without the search: its elbow, stepping aside for every box in its way. A level
+// stretch goes over or under the box, an upright one left or right of it, whichever is
+// nearer, a stub's length away; the step may meet the next box, so it goes on until the way
+// is clear. there: the boxes by x (see searchRoutes).
+function detour(e, there) {
   const loop = e.outDir !== e.inDir, X = !loop ? Math.round((e.sx + e.tx) / 2) : e.outDir ? Math.min(e.sx, e.tx) : Math.max(e.sx, e.tx);
-  const x0 = Math.min(e.x1, e.x2, X), x1 = Math.max(e.x1, e.x2, X), y0 = Math.min(e.sy, e.ty), y1 = Math.max(e.sy, e.ty);
-  let top = Math.min(e.a.y, e.b.y), bottom = Math.max(e.a.y + e.a.h, e.b.y + e.b.h);
-  for (const b of byX) {
-    if (b.x >= x1) break;
-    if (b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0) { top = Math.min(top, b.y); bottom = Math.max(bottom, b.y + b.h); }
-  }
-  top -= 2 * ROUTE.MARGIN;
-  bottom += 2 * ROUTE.MARGIN;
-  const round = y => [[e.x1, e.sy], [e.sx, e.sy], [e.sx, y], [e.tx, y], [e.tx, e.ty], [e.x2, e.ty]];
-  const ways = [[[e.x1, e.sy], [X, e.sy], [X, e.ty], [e.x2, e.ty]], ...(e.sy + e.ty - 2 * top <= 2 * bottom - e.sy - e.ty ? [top, bottom] : [bottom, top]).map(round)];
-  let best = null;
-  for (const way of ways) {
-    const lo = Math.min(...way.map(p => p[0])), hi = Math.max(...way.map(p => p[0]));
-    let n = 0;
-    for (const b of byX) {
-      if (b.x >= hi) break;
-      if (b.x + b.w > lo) for (let i = 1; i < way.length; i++) if (segHitsRect([way[i - 1][0], way[i - 1][1], way[i][0], way[i][1]], b)) n++;
+  const way = [[e.x1, e.sy], [X, e.sy], [X, e.ty], [e.x2, e.ty]], S = ROUTE.STUB, byX = there.byX, rounded = [new Set(), new Set()];
+  for (let i = 1; i < way.length; i++) {
+    const [ax, ay] = way[i - 1], [bx, by] = way[i], level = ay === by, hi = Math.max(ax, bx);
+    // the first box on this stretch
+    let box = null, near = Infinity, lo = 0;
+    for (let end = byX.length; lo < end;) { const mid = (lo + end) >> 1; if (byX[mid].x >= Math.min(ax, bx) - there.widest) end = mid; else lo = mid + 1; }
+    for (let k = lo; k < byX.length && byX[k].x < hi; k++) {
+      const b = byX[k];
+      if (!segHitsRect([ax, ay, bx, by], b)) continue;
+      const far = level ? Math.abs((bx > ax ? b.x : b.x + b.w) - ax) : Math.abs((by > ay ? b.y : b.y + b.h) - ay);
+      if (far < near) { box = b; near = far; }
     }
-    if (!n) return way;
-    if (!best || n < best.n) best = { way, n };
+    // a box is rounded once each way: where that does not get past it, the line stays on it
+    if (!box || rounded[level ? 0 : 1].has(box)) continue;
+    rounded[level ? 0 : 1].add(box);
+    // Round it: out to `side`, along the box, and back; if the stretch ends beside the box, its
+    // end moves out instead. Not where it begins or ends at the box itself (a port walled in).
+    const [p, q, o] = level ? [ax, bx, ay] : [ay, by, ax], [start, size, cross, girth] = level ? [box.x, box.w, box.y, box.h] : [box.y, box.h, box.x, box.w];
+    const side = o - (cross - S) <= cross + girth + S - o ? cross - S : cross + girth + S;
+    const from = q > p ? Math.max(p, start - S) : Math.min(p, start + size + S), to = q > p ? Math.min(q, start + size + S) : Math.max(q, start - S);
+    const point = (along, across) => level ? [along, across] : [across, along], turns = way[i + 1]?.[level ? 0 : 1] === q; // the next stretch runs the other way
+    if ((from === p && i === 1) || (p > start && p < start + size) || (to === q && !turns)) continue;
+    if (to === q) way.splice(i, 1, point(from, o), point(from, side), point(q, side));
+    else way.splice(i, 0, point(from, o), point(from, side), point(to, side), point(to, o));
+    i--;
   }
-  return best.way;
+  return way;
 }
 
 // The grid an arrow is searched for on: lines along the edges (and a margin out) of the boxes
@@ -803,22 +834,33 @@ function detour(e, byX) {
 // along[2n] tells what runs from node n to the next one on its right, along[2n + 1] to the one
 // below it, at[n] what passes node n: 0 nothing, a row line's number, or -1 several of them.
 // The stub ends of the arrows still to be searched for (pending) are theirs alone.
-// work: what building it took; it comes without cells if there would be too many.
-function searchGrid(e, sides, edges, boxes, pending, lineOf) {
-  const { MARGIN, GRID, WINDOW } = ROUTE, span = bboxOf([e.a, e.b]), reach = bboxOf(boxes.filter(b => rectsTouch(b, span)));
-  const x0 = reach.x - WINDOW, y0 = reach.y - WINDOW, x1 = reach.x + reach.w + WINDOW, y1 = reach.y + reach.h + WINDOW;
-  const near = boxes.filter(b => b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0), drawn = [];
-  let work = 2 * boxes.length;
-  for (const o of edges) {
-    if (pending.has(o)) continue;
-    work += o.points.length;
-    for (let i = 1; i < o.points.length; i++) {
-      const [ax, ay] = o.points[i - 1], [bx, by] = o.points[i];
-      if (Math.min(ax, bx) > x1 || Math.max(ax, bx) < x0 || Math.min(ay, by) > y1 || Math.max(ay, by) < y0) continue;
-      const cut = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-      drawn.push({ ax: cut(ax, x0, x1), ay: cut(ay, y0, y1), bx: cut(bx, x0, x1), by: cut(by, y0, y1), line: lineOf.get(o.to) });
+// there: the boxes and the drawn lines, in order (see searchRoutes). work: the boxes and the
+// stretches of lines in the window, and its cells; it comes without cells if there would be too many.
+function searchGrid(e, sides, there, pending, line) {
+  const { MARGIN, GRID, WINDOW } = ROUTE, span = bboxOf([e.a, e.b]);
+  const first = (list, at, v) => { let lo = 0, hi = list.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (at(list[mid]) >= v) hi = mid; else lo = mid + 1; } return lo; };
+  // the boxes that reach into a stretch of x begin in it or less than the widest box before it
+  const boxesIn = (xa, ya, xb, yb) => {
+    const found = [];
+    for (let i = first(there.byX, b => b.x, xa - there.widest); i < there.byX.length && there.byX[i].x < xb; i++) {
+      const b = there.byX[i];
+      if (b.x + b.w > xa && b.y < yb && b.y + b.h > ya) found.push(b);
     }
-  }
+    return found;
+  };
+  const reach = bboxOf(boxesIn(span.x, span.y, span.x + span.w, span.y + span.h));
+  const x0 = reach.x - WINDOW, y0 = reach.y - WINDOW, x1 = reach.x + reach.w + WINDOW, y1 = reach.y + reach.h + WINDOW;
+  const near = boxesIn(x0, y0, x1, y1), drawn = [], cut = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const take = s => {
+    const [u0, u1, v0, v1] = s.level ? [y0, y1, x0, x1] : [x0, x1, y0, y1];
+    if (s.at < u0 || s.at > u1 || s.b < v0 || s.a > v1) return;
+    const a = cut(s.a, v0, v1), b = cut(s.b, v0, v1);
+    drawn.push(s.level ? { ax: a, ay: s.at, bx: b, by: s.at, line: s.line } : { ax: s.at, ay: a, bx: s.at, by: b, line: s.line });
+  };
+  for (let i = first(there.level, s => s.at, y0); i < there.level.length && there.level[i].at <= y1; i++) take(there.level[i]);
+  for (let i = first(there.upright, s => s.at, x0); i < there.upright.length && there.upright[i].at <= x1; i++) take(there.upright[i]);
+  there.added.forEach(take);
+  const work = near.length + drawn.length;
   const mine = (x, y) => sides.some(v => (x === v.sx && y === v.sy) || (x === v.tx && y === v.ty)), stubs = [];
   for (const o of pending) {
     for (const [x, y] of [[o.sx, o.sy], [o.tx, o.ty]]) if (!mine(x, y) && x > x0 && x < x1 && y > y0 && y < y1) stubs.push([x, y]);
@@ -836,7 +878,7 @@ function searchGrid(e, sides, edges, boxes, pending, lineOf) {
   const nx = xs.length, ny = ys.length;
   if (nx * ny > ROUTE.CELLS) return { work };
   const xi = new Map(xs.map((v, i) => [v, i])), yi = new Map(ys.map((v, i) => [v, i]));
-  const grid = { xs, ys, nx, ny, xi, yi, work: work + nx * ny, line: lineOf.get(e.to), blocked: new Uint8Array(nx * ny), along: new Int32Array(2 * nx * ny), at: new Int32Array(nx * ny) };
+  const grid = { xs, ys, nx, ny, xi, yi, work: work + nx * ny, line, blocked: new Uint8Array(nx * ny), along: new Int32Array(2 * nx * ny), at: new Int32Array(nx * ny) };
   for (const b of near) {
     for (let i = 0; i < nx; i++) {
       if (xs[i] <= b.x - MARGIN || xs[i] >= b.x + b.w + MARGIN) continue;
@@ -869,7 +911,7 @@ function astar(grid, e) {
   const stamp = routeBuf.stamp;
   const tx = xs[t % nx], ty = ys[Math.floor(t / nx)];
   // Merged lanes cost less per pixel, so scale the heuristic to remain admissible.
-  const h = n => (1 - MERGE) * (Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty));
+  const h = (x, y) => (1 - MERGE) * (Math.abs(x - tx) + Math.abs(y - ty));
   const heap = new MinHeap();
   const relax = (from, to, cost, hh) => {
     if (seen[to] === stamp && cost >= g[to]) return;
@@ -878,7 +920,7 @@ function astar(grid, e) {
     prev[to] = from;
     heap.push(cost + hh, to);
   };
-  relax(-1, s * 4 + e.outDir, 0, h(s));
+  relax(-1, s * 4 + e.outDir, 0, h(e.sx, e.sy));
   let steps = 0;
   for (; heap.size && steps < ROUTE.STEPS; steps++) {
     const st = heap.pop();
@@ -902,20 +944,24 @@ function astar(grid, e) {
       // along its own row line a stretch is cheap and meets nothing; a node another line passes is a crossing
       const run = along[2 * Math.min(n, m) + (nd > 1 ? 1 : 0)], share = run === 0 ? 0 : run === line ? -MERGE : SHARE_OTHER;
       const len = Math.abs(xs[ii] - xs[i]) + Math.abs(ys[jj] - ys[j]);
-      relax(st, m * 4 + nd, gc + len * (1 + share) + (nd === d ? 0 : BEND) + (run !== line && at[m] !== 0 && at[m] !== line ? CROSS : 0), h(m));
+      relax(st, m * 4 + nd, gc + len * (1 + share) + (nd === d ? 0 : BEND) + (run !== line && at[m] !== 0 && at[m] !== line ? CROSS : 0), h(xs[ii], ys[jj]));
     }
   }
   return { steps };
 }
 
-// The corners of a route: no repeated points, none in the middle of a straight run
+// The corners of a route: no repeated points, none in the middle of a straight run (or at
+// the end of one that turns back on itself). Its two ends always, even when they are one
+// place (a column that references itself): whoever draws it counts on two points.
 function simplify(points) {
-  return points.filter((q, i) => {
-    if (i === 0 || i === points.length - 1) return true;
-    const a = points[i - 1], b = points[i + 1];
-    if (a[0] === q[0] && a[1] === q[1]) return false;
-    return !((a[0] === q[0] && q[0] === b[0]) || (a[1] === q[1] && q[1] === b[1]));
-  });
+  const out = [];
+  for (const q of points) {
+    const a = out[out.length - 2], b = out[out.length - 1];
+    if (a && ((a[0] === b[0] && b[0] === q[0]) || (a[1] === b[1] && b[1] === q[1]))) out.pop();
+    const last = out[out.length - 1];
+    if (!last || last[0] !== q[0] || last[1] !== q[1]) out.push(q);
+  }
+  return out.length > 1 ? out : [points[0], points[points.length - 1]];
 }
 
 // Where arrows cross, the horizontal line jumps over the vertical one with a small arch.
@@ -1082,6 +1128,8 @@ const svg = $('#canvas'), vp = $('#vp');
 $('#diagramCss').textContent = DIAGRAM_CSS;
 
 let geometry = { boxes: new Map(), edges: [] };
+let routed = null; // what the last routing kept, for the next to go on with (see routeEdges)
+let moreRoutes = 0; // the frame asked for while arrows wait for their search
 
 function computeGeometry() {
   const tables = model.tables;
@@ -1094,9 +1142,10 @@ function computeGeometry() {
   }));
   const edges = state.dataView ? [] : diagramEdges(tables, boxes);
   const held = drag?.kind === 'box' && drag.moved ? new Set(tables.filter(t => drag.start[t.name]).map(t => boxes.get(t))) : null;
-  routeEdges(edges, [...boxes.values()], held);
+  const { waiting, kept } = routeEdges(edges, [...boxes.values()], held, routed);
+  routed = kept;
   if ((state.notation === 'uml' || state.notation === 'ratio') && !state.dataView) placeLabels(edges);
-  geometry = { boxes, edges, dims, bundles: bundles(edges) };
+  geometry = { boxes, edges, dims, bundles: bundles(edges), waiting: held ? 0 : waiting }; // a drag draws anyway, and searches for all when it ends
 }
 
 // Where several arrows run along the same stretch, that stretch is drawn thicker:
@@ -1348,6 +1397,8 @@ function diagramMarkup(interactive) {
 
 function drawDiagram() {
   computeGeometry();
+  // arrows on a detour, waiting for their search: the next frame goes on with them
+  if (geometry.waiting && !moreRoutes) moreRoutes = requestAnimationFrame(() => { moreRoutes = 0; drawDiagram(); });
   vp.innerHTML = diagramMarkup(true);
   $('#emptyState').hidden = model.tables.length > 0;
   if (hoverTable) highlightTable(hoverTable);
