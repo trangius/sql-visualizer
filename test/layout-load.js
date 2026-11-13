@@ -11,20 +11,20 @@ module.exports = function load() {
   const edges = diagram.slice(diagram.indexOf('function diagramEdges('), diagram.indexOf('function dataBoxBody('));
   return new Function(`
     const state = { dataView: false, keysOnly: false, notation: 'arrows' };
-    const canvas = { width: 1400, height: 1000 }, view = { s: 1 };
+    const canvas = { width: 1500, height: 1000 }, view = { tx: 0, ty: 0, s: 1 };
     const svg = { getBoundingClientRect: () => canvas };
     const document = { querySelector: () => null, createElement: () => ({ getContext: () => ({
       measureText: s => ({ width: s.length * 7 })
     }) }) };
     const localStorage = { getItem: () => null };
-    const pos = {}, viewCenter = () => null, CARD_TOP = 64, CARD_BOTTOM = 56;
+    const pos = {}, viewCenter = () => null, saveDoc = () => {};
+    let prevNames = null;
     ${read('model')}
     ${read('examples')}
     ${geometry}
     ${edges}
     ${read('layout')}
-    return { state, canvas, view, pos, parseText, resolve, markShown, measureTable,
-      arrangeAll, placeColumns, layoutEdges, diagramEdges, routeEdges, routeQuality,
-      drawnQuality, simplify, compareLayout, EXAMPLES, AUTO };
+    return { state, canvas, pos, parseText, resolve, markShown, shownCols, measureTable, ensurePositions,
+      arrangeAll, diagramEdges, routeEdges, simplify, EXAMPLES, AUTO, ROUTE };
   `)();
 };

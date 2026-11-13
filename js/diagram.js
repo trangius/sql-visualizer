@@ -206,13 +206,22 @@ function ensurePositions(tables, dims) {
       const old = prevNames?.[i];
       if (!pos[t.name] && old && !names.has(old) && pos[old]) { pos[t.name] = pos[old]; changed = true; }
     });
-    const edges = layoutEdges(tables);
+    const fresh = tables.filter(t => !pos[t.name]);
+    if (fresh.length > AUTO.NEW_BATCH) {
+      for (const q of Object.values(pos)) delete q.float; // none of a block floats
+      arrangeBeside(fresh, tables.filter(t => pos[t.name]), dims);
+      revealName = fresh[0].name;
+      changed = true;
+    }
+    let edges = null;
     for (const t of tables) {
-      const p = pos[t.name], sig = linkSignature(t, tables);
-      if (p && !(p.float && p.sig !== sig)) continue;
+      const p = pos[t.name];
+      if (p && !p.float) continue;
+      const sig = linkSignature(t, tables);
+      if (p?.sig === sig) continue;
       if (!p) for (const q of Object.values(pos)) delete q.float; // only the newest one floats
       const placed = new Map(tables.filter(o => o !== t && pos[o.name]).map(o => [o, { ...pos[o.name], ...dims.get(o) }]));
-      const s = bestSpot(t, placed, dims, edges, viewCenter());
+      const s = bestSpot(t, placed, dims, edges ??= layoutEdges(tables), viewCenter());
       pos[t.name] = { x: s.x, y: s.y, float: true, sig };
       revealName = t.name;
       changed = true;
@@ -222,11 +231,464 @@ function ensurePositions(tables, dims) {
   if (changed) saveDoc();
 }
 
-// Arrows leave the FK row horizontally and enter the Id row horizontally.
-// In between they are routed orthogonally around the boxes (A* on a grid),
-// with a cost for every bend. An arrow may never run through another arrow's end point, and running
-// along a lane used by an arrow to a *different* Id is very expensive (it would look like it points there).
-const ROUTE = { GAP: 30, MARGIN: 10, STUB: 20, GRID: 10, BEND: 40, SHARE_OTHER: 60, MERGE: 0.5 };
+// ─── Routing ────────────────────────────────────────────────────────────────
+// Arrows leave the FK row horizontally and enter the Id row horizontally. The tables stand
+// in columns with channels between them, so a route is read off the boxes without a search:
+// level through the columns where its row is free, one jog in a channel (two when no row is
+// free), and the vertical runs of a channel put in an order in which they don't cross.
+// Arrows to one row are one row line: they share lanes and vertical runs (drawn thicker)
+// and don't count as crossing each other.
+// Only an arrow the columns can't serve (a table dragged out of line, or onto a channel) is
+// searched for, with A* on a grid around its two tables.
+const ROUTE = {
+  STUB: 20, TRACK: 16,                 // from a box to the first vertical run; between two runs
+  CH_MIN: 20, CLEAR: 10, LANE_MIN: 8,  // the narrowest channel; a line's distance to a box, and to another row line in a column
+  NEAR: 100,                           // how far outside its tables a group's lines go: other tables that near share its columns
+  GAP_TRIES: 8, SIDE_DETOUR: 400, BUDGET: 2e6, ORDER_MAX: 48,
+  // the search:
+  GAP: 30, MARGIN: 10, GRID: 10, BEND: 40, CROSS: 250, SHARE_OTHER: 60, MERGE: 0.5,
+  WINDOW: 200, STEPS: 2e5, CELLS: 2e6, WORK: 5e5,
+};
+
+// Routes every arrow (edge.points, and edge.d with the hops over other lines). An edge is
+// { a, b, sy, ty, row, from, to }: its two boxes, the heights it leaves and ends at, the
+// height of the row it points to (ty moves off it where a notation spreads the ends) and
+// the two rows' names. held: the boxes being dragged, if any (see searchRoutes).
+// Returns how many arrows had to be searched for.
+function routeEdges(edges, boxes, held = null) {
+  if (!edges.length) return 0;
+  const searched = routeGroups(edges, boxes).flatMap(g => routeGroup(g.arrows, g.boxes));
+  searchRoutes(searched, edges, boxes, held);
+  addJumps(edges);
+  return searched.length;
+}
+
+// R1: tables joined by arrows are routed together, on columns of their own. So are groups
+// that come within NEAR of each other, and single tables that near: their lines share
+// channels, and must share the tracks in them. Returns [{ arrows, boxes }], boxes sorted by x.
+function routeGroups(edges, boxes) {
+  const root = new Map(boxes.map(b => [b, b]));
+  const find = b => {
+    while (root.get(b) !== b) { root.set(b, root.get(root.get(b))); b = root.get(b); }
+    return b;
+  };
+  for (const e of edges) root.set(find(e.a), find(e.b));
+  const sorted = [...boxes].sort((p, q) => p.x - q.x || p.y - q.y), widest = boxes.reduce((w, b) => Math.max(w, b.w), 0);
+  const firstFrom = x => { let lo = 0, hi = sorted.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid].x >= x) hi = mid; else lo = mid + 1; } return lo; };
+  let live;
+  for (let joined = true; joined;) {
+    joined = false;
+    live = new Map(edges.map(e => [find(e.a), null])); // the groups with arrows, and how far they reach
+    for (const b of boxes) {
+      const r = find(b), reach = live.get(r);
+      if (reach) { reach.x0 = Math.min(reach.x0, b.x); reach.y0 = Math.min(reach.y0, b.y); reach.x1 = Math.max(reach.x1, b.x + b.w); reach.y1 = Math.max(reach.y1, b.y + b.h); }
+      else if (reach === null) live.set(r, { x0: b.x, y0: b.y, x1: b.x + b.w, y1: b.y + b.h });
+    }
+    // only the boxes that begin in a group's stretch of x can be near it: they are found in the sorted list
+    for (const [r, reach] of live) {
+      for (let i = firstFrom(reach.x0 - ROUTE.NEAR - widest + 1); i < sorted.length && sorted[i].x < reach.x1 + ROUTE.NEAR; i++) {
+        const b = sorted[i];
+        if (b.x + b.w <= reach.x0 - ROUTE.NEAR || b.y >= reach.y1 + ROUTE.NEAR || b.y + b.h <= reach.y0 - ROUTE.NEAR || find(b) === find(r)) continue;
+        root.set(find(b), find(r));
+        joined = true;
+      }
+    }
+  }
+  const groups = new Map([...live.keys()].map(r => [r, { arrows: [], boxes: [] }]));
+  for (const b of sorted) groups.get(find(b))?.boxes.push(b);
+  for (const e of edges) groups.get(find(e.a)).arrows.push(e);
+  return [...groups.values()];
+}
+
+// Is v strictly inside one of these spans ([lo, hi], sorted and apart)?
+function insideSpans(spans, v) {
+  let lo = 0, hi = spans.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid][1] <= v) lo = mid + 1;
+    else if (spans[mid][0] >= v) hi = mid - 1;
+    else return true;
+  }
+  return false;
+}
+
+// R2: boxes (sorted by x) in columns. The boxes of a column stand over each other: some x is
+// inside them all, so the way out of one never runs into another. Two columns are at least a
+// channel apart. A box that fits neither way (dragged half out of its column, or onto a
+// channel) is left out as an obstacle: { cols: [{ xl, xr, boxes }], obstacles }.
+function boxColumns(sorted) {
+  const all = [], cols = [], obstacles = [];
+  for (const b of sorted) {
+    const col = all[all.length - 1];
+    if (col && b.x < col.over) { col.boxes.push(b); col.over = Math.min(col.over, b.x + b.w); }
+    else all.push({ over: b.x + b.w, boxes: [b] });
+  }
+  const right = col => col.boxes.reduce((x, b) => Math.max(x, b.x + b.w), -Infinity);
+  for (let col of all) {
+    // Too close to the column before: boxes go, each time the one that sticks out most (the
+    // gap it opens; none for a column's last box), on a tie one of the smaller column, until
+    // the two are apart or one of them is gone
+    for (let last; col && (last = cols[cols.length - 1]) && col.boxes[0].x - right(last) < ROUTE.CH_MIN;) {
+      const a = last.boxes.reduce((p, q) => q.x + q.w > p.x + p.w ? q : p), rest = { boxes: last.boxes.filter(b => b !== a) };
+      const gainA = rest.boxes.length ? right(last) - right(rest) : 0, gainB = col.boxes.length > 1 ? col.boxes[1].x - col.boxes[0].x : 0;
+      if (gainA > gainB || (gainA === gainB && last.boxes.length < col.boxes.length)) {
+        obstacles.push(a);
+        last.boxes = rest.boxes;
+        if (!rest.boxes.length) cols.pop();
+      } else {
+        obstacles.push(col.boxes.shift());
+        if (!col.boxes.length) col = null;
+      }
+    }
+    if (col) cols.push(col);
+  }
+  for (const col of cols) { col.xl = col.boxes[0].x; col.xr = right(col); }
+  return { cols, obstacles };
+}
+
+// One group's arrows on its columns. Returns the arrows the columns can't serve.
+function routeGroup(arrows, members) {
+  const { STUB, TRACK } = ROUTE, { cols, obstacles } = boxColumns(members), C = cols.length, colOf = new Map();
+  if (!C) return arrows;
+  // A column knows where it is blocked: by its boxes, and by an obstacle that reaches into it
+  // or into a channel beside it. And which row lines pass it at which height (lanes).
+  cols.forEach((col, c) => {
+    const from = c ? cols[c - 1].xr : -Infinity, to = c + 1 < C ? cols[c + 1].xl : Infinity;
+    col.boxes.forEach(b => colOf.set(b, c));
+    col.blocked = [];
+    col.lanes = new Map();
+    for (const b of [...col.boxes, ...obstacles.filter(o => o.x < to && o.x + o.w > from)].sort((p, q) => p.y - q.y)) {
+      const lo = b.y - ROUTE.CLEAR, hi = b.y + b.h + ROUTE.CLEAR, last = col.blocked[col.blocked.length - 1];
+      if (last && lo <= last[1]) last[1] = Math.max(last[1], hi);
+      else col.blocked.push([lo, hi]);
+    }
+  });
+  // Channel j is the strip left of column j; 0 and C are the outsides. What an arrow does in
+  // a channel is an entry: kind 0 from the left edge (at height l) to the right edge (at r),
+  // kind 1 a loop on the left edge and kind 2 one on the right edge (l to r its span).
+  const channels = Array.from({ length: C + 1 }, () => []), mates = channels.map(() => new Map()); // mates: a channel's entries by row line
+  const middle = channels.map((_, j) => j === 0 ? cols[0].xl - STUB : j === C ? cols[C - 1].xr + STUB : (cols[j - 1].xr + cols[j].xl) >> 1);
+  let budget = ROUTE.BUDGET;
+
+  // R3: a height is free in a column for a row line when no box is there and no other row line runs near it
+  const free = (c, y, line) => {
+    if (insideSpans(cols[c].blocked, y)) return false;
+    for (let q = Math.round(y) - ROUTE.LANE_MIN + 1; q < Math.round(y) + ROUTE.LANE_MIN; q++) {
+      const lane = cols[c].lanes.get(q);
+      if (lane && lane.line !== line && lane.count) return false;
+    }
+    return true;
+  };
+  const cross = (p, q) => {
+    if (!p.kind && !q.kind) return (p.l - q.l) * (p.r - q.r) < 0;
+    if (p.kind && q.kind) return p.kind === q.kind && ((p.l < q.l && q.l < p.r && p.r < q.r) || (q.l < p.l && p.l < q.r && q.r < p.r));
+    const [through, loop] = p.kind ? [q, p] : [p, q], y = loop.kind === 1 ? through.l : through.r;
+    return y > loop.l && y < loop.r;
+  };
+  // How many entries of other row lines these would cross; nothing once the budget is spent.
+  // A crossing that its own row line already makes there, with an entry it will run along,
+  // is not another one: a bus crosses a line once, however many arrows are on it.
+  const crossings = (entries, line) => {
+    if (budget <= 0) return 0;
+    let x = 0;
+    for (const en of entries) {
+      const same = mates[en.j].get(line) ?? [];
+      budget -= channels[en.j].length;
+      for (const s of channels[en.j]) {
+        if (s.line === line || !cross(en, s)) continue;
+        budget -= same.length;
+        if (!same.some(m => m.kind === en.kind && Math.min(m.l, m.r) <= Math.max(en.l, en.r) && Math.min(en.l, en.r) <= Math.max(m.l, m.r) && cross(m, s))) x++;
+      }
+    }
+    return x;
+  };
+  const put = (list, en, at) => { en[at] = list.length; list.push(en); };
+  const pull = (list, en, at) => {
+    const last = list.pop();
+    if (last !== en) { list[en[at]] = last; last[at] = en[at]; }
+  };
+
+  // R4: one way to draw an arrow, out of side sa of its table and into side sb of the other
+  // (0 left, 1 right). It passes k columns: the first F have its own row free, the last G
+  // the row it points to.
+  const plan = (e, line, sa, sb) => {
+    const ja = colOf.get(e.a) + sa, jb = colOf.get(e.b) + sb, d = Math.sign(jb - ja), k = Math.abs(jb - ja);
+    const colAt = i => d > 0 ? ja + i : ja - 1 - i;
+    // what it does in the i-th channel it passes: in at height y, out at height to
+    const entry = (i, y, to) => {
+      const fromLeft = i ? d > 0 : sa === 1, toRight = i < k ? d > 0 : sb === 0;
+      return fromLeft === toRight ? { j: ja + d * i, kind: 0, l: fromLeft ? y : to, r: fromLeft ? to : y }
+        : { j: ja + d * i, kind: fromLeft ? 1 : 2, l: Math.min(y, to), r: Math.max(y, to) };
+    };
+    // turns: [after how many columns, the height from there on]. The last channel always ends
+    // at the arrow's own end. x: how many lines it crosses, if that is known already.
+    const build = (turns, x) => {
+      const p = { sa, sb, jogs: [], entries: [], lanes: [] };
+      let y = e.sy, t = 0;
+      for (let i = 0; i <= k; i++) {
+        const turn = t < turns.length && turns[t][0] === i ? turns[t++][1] : y, to = i === k ? e.ty : turn, en = entry(i, y, to);
+        p.entries.push(en);
+        if (to !== y) p.jogs.push({ en, y0: y, y1: to });
+        if (i < k) p.lanes.push([colAt(i), to]);
+        y = to;
+      }
+      const xa = sa ? e.a.x + e.a.w : e.a.x, xb = sb ? e.b.x + e.b.w : e.b.x;
+      p.len = Math.abs(xa - middle[ja]) + Math.abs(middle[ja] - middle[jb]) + Math.abs(middle[jb] - xb) + p.jogs.reduce((s, jog) => s + Math.abs(jog.y0 - jog.y1), 0);
+      p.x = x ?? crossings(p.entries, line);
+      return p;
+    };
+    let F = 0, G = 0;
+    while (F < k && free(colAt(F), e.sy, line)) F++;
+    while (G < k && free(colAt(k - 1 - G), e.row, line)) G++;
+    if (!k || (F === k && e.sy === e.row)) return build([]);
+    if (F + G >= k) {
+      // One jog, where it crosses least; the first on a tie, so it joins its row line early.
+      // What it crosses with the jog after i columns: at its own height in the channels
+      // before, in the jog, and at the height it points to in the channels after.
+      const count = (i, y, to) => crossings([entry(i, y, to)], line), before = [0], after = [0];
+      for (let i = 0; i < k - G; i++) before[0] += count(i, e.sy, e.sy);
+      for (let i = k - G; i < F; i++) before.push(before[before.length - 1] + count(i, e.sy, e.sy));
+      for (let i = k; i > k - G; i--) after.push(after[after.length - 1] + count(i, e.row, i === k ? e.ty : e.row));
+      let best = k - G, least = Infinity;
+      for (let i = k - G; i <= F; i++) {
+        const x = before[i - (k - G)] + count(i, e.sy, i === k ? e.ty : e.row) + after[k - i];
+        if (x < least) { best = i; least = x; }
+      }
+      return build([[best, e.row]], least);
+    }
+    // Two jogs, with a height between that is free in the columns neither row can pass: a gap
+    // between the boxes of the first of them, near the two rows; else above or below them all.
+    // In a gap it keeps another CLEAR from the boxes where there is room, not to run along an edge.
+    const clear = y => { for (let i = F; i < k - G; i++) if (!free(colAt(i), y, line)) return false; return true; };
+    const far = y => Math.abs(y - e.sy) + Math.abs(y - e.row), want = Math.floor((e.sy + e.row) / 2), spans = cols[colAt(F)].blocked, tries = [];
+    for (let i = 0; i + 1 < spans.length; i++) {
+      const room = Math.min(ROUTE.CLEAR, Math.floor((spans[i + 1][0] - spans[i][1]) / 2)), lo = spans[i][1] + room, hi = spans[i + 1][0] - room;
+      if (hi - lo >= 0 && spans[i + 1][0] - spans[i][1] >= 1) tries.push(Math.max(lo, Math.min(hi, want)), Math.floor((lo + hi) / 2));
+    }
+    tries.sort((a, b) => far(a) - far(b) || Math.abs(a - want) - Math.abs(b - want));
+    let between = tries.slice(0, ROUTE.GAP_TRIES).find(clear);
+    if (between === undefined) {
+      let top = Infinity, bottom = -Infinity;
+      for (let i = F; i < k - G; i++) {
+        const s = cols[colAt(i)].blocked;
+        top = Math.min(top, s[0][0]);
+        bottom = Math.max(bottom, s[s.length - 1][1]);
+      }
+      for (let step = 1; between === undefined; step++) {
+        const above = top - ROUTE.CLEAR - step * TRACK, below = bottom + ROUTE.CLEAR + step * TRACK;
+        between = (far(above) <= far(below) ? [above, below] : [below, above]).find(clear);
+      }
+    }
+    return build([[F, between], [k - G, e.row]]);
+  };
+
+  // R5: the arrows shortest first (self-references last), each drawn the way that crosses least.
+  // Not those of an obstacle: they are searched for.
+  const inLine = e => colOf.has(e.a) && colOf.has(e.b);
+  const span = e => e.a === e.b ? Infinity : Math.abs(e.a.x - e.b.x) + Math.abs(e.sy - e.row);
+  const order = arrows.filter(inLine).sort((p, q) => span(p) - span(q) || p.a.x - q.a.x || p.sy - q.sy || p.b.x - q.b.x || p.row - q.row || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0));
+  const lineOf = new Map(), plans = [], sides = new Map(members.map(b => [b, [0, 0]])); // sides: how many lines a box has to tables on its left, on its right
+  for (const e of order) if (!lineOf.has(e.to)) lineOf.set(e.to, lineOf.size);
+  for (const e of arrows) {
+    if (inLine(e) && colOf.get(e.a) === colOf.get(e.b)) continue;
+    const right = 2 * e.b.x + e.b.w > 2 * e.a.x + e.a.w ? 1 : 0;
+    sides.get(e.a)[right]++;
+    sides.get(e.b)[1 - right]++;
+  }
+  const choose = i => {
+    const e = order[i], line = lineOf.get(e.to), ca = colOf.get(e.a), cb = colOf.get(e.b);
+    let best;
+    if (ca === cb) {
+      // A loop on one side of the column (a self-reference too): the side that crosses less,
+      // then the one fewer of the two boxes' other lines come from, then the one they are nearer
+      const l = plan(e, line, 0, 0), r = plan(e, line, 1, 1), col = cols[ca], busy = side => sides.get(e.a)[side] + (e.a === e.b ? 0 : sides.get(e.b)[side]);
+      best = (l.x - r.x || busy(0) - busy(1) || (e.a.x + e.b.x - 2 * col.xl) - (2 * col.xr - e.a.x - e.a.w - e.b.x - e.b.w)) <= 0 ? l : r;
+    } else {
+      // Out of the side that faces the other table and into the side that faces this one.
+      // Round the other table, into its far side, only if that crosses less; out of this
+      // table's far side (a line that starts the other way is hard to follow) only if it
+      // saves two crossings; and neither if it is much longer.
+      const toward = cb > ca ? 1 : 0, facing = plan(e, line, toward, 1 - toward);
+      best = facing;
+      if (budget > 0) for (const [sa, sb, saves] of [[toward, toward, 1], [1 - toward, 1 - toward, 2], [1 - toward, toward, 2]]) {
+        if (facing.x < saves) break;
+        const round = plan(e, line, sa, sb);
+        if (round.x < best.x && round.x <= facing.x - saves && round.len <= facing.len + ROUTE.SIDE_DETOUR) best = round;
+      }
+    }
+    plans[i] = best;
+    for (const en of best.entries) {
+      en.line = line;
+      if (!mates[en.j].has(line)) mates[en.j].set(line, []);
+      put(channels[en.j], en, 'at');
+      put(mates[en.j].get(line), en, 'mate');
+    }
+    for (const [c, y] of best.lanes) {
+      const lane = cols[c].lanes.get(Math.round(y));
+      if (lane?.line === line) lane.count++;
+      else cols[c].lanes.set(Math.round(y), { line, count: 1 });
+    }
+  };
+  for (let i = 0; i < order.length; i++) choose(i);
+  // once more: each arrow is lifted and chosen again, now that all the others are known
+  for (let i = 0; i < order.length && budget > 0; i++) {
+    for (const en of plans[i].entries) {
+      pull(channels[en.j], en, 'at');
+      pull(mates[en.j].get(en.line), en, 'mate');
+    }
+    for (const [c, y] of plans[i].lanes) {
+      const lane = cols[c].lanes.get(Math.round(y));
+      if (lane.line === lineOf.get(order[i].to)) lane.count--;
+    }
+    choose(i);
+  }
+
+  // R6: every vertical run (trunk) of a channel gets an x. Overlapping trunks of one row line
+  // run as one. Loops on the left edge stand nearest it (short ones first), then lines going
+  // up by the height of their left end, lines going down the other way, loops on the right edge.
+  channels.forEach((entries, j) => {
+    const trunks = [], taken = new Set(); // taken: the heights lines end at on the channel's two edges
+    for (const en of entries) { taken.add(en.l); taken.add(en.r); }
+    for (const en of entries.filter(en => en.kind || en.l !== en.r).sort((p, q) => p.line - q.line || p.kind - q.kind || Math.min(p.l, p.r) - Math.min(q.l, q.r))) {
+      const lo = Math.min(en.l, en.r), hi = Math.max(en.l, en.r), t = trunks[trunks.length - 1];
+      if (t && t.line === en.line && t.kind === en.kind && lo <= t.hi) { t.hi = Math.max(t.hi, hi); t.members.push(en); t.left += en.l; }
+      else trunks.push({ line: en.line, kind: en.kind, lo, hi, members: [en], left: en.l, right: 0, before: [], after: [], rank: 0 });
+    }
+    if (!trunks.length) return;
+    for (const t of trunks) {
+      for (const en of t.members) t.right += en.r;
+      t.band = t.kind === 1 ? 0 : t.kind === 2 ? 3 : t.right < t.left ? 1 : 2;
+    }
+    // by the mean height of the left ends, compared as fractions
+    const leftEnd = (p, q) => p.left * q.members.length - q.left * p.members.length;
+    trunks.sort((p, q) => p.band - q.band
+      || (p.band === 0 ? (p.hi - p.lo) - (q.hi - q.lo) : p.band === 1 ? leftEnd(p, q) : p.band === 2 ? leftEnd(q, p) : (q.hi - q.lo) - (p.hi - p.lo))
+      || p.lo - q.lo || p.hi - q.hi || p.line - q.line);
+    // Two rows level with each other on the two edges: a trunk that ends on the left edge
+    // there must stand left of every other row line's trunk that ends on the right edge
+    // there, or their stubs would lie on each other.
+    const ends = new Map(); // height → the trunks that end there on the left edge, and on the right edge
+    const level = new Set(entries.filter(en => !en.kind && en.l === en.r).map(en => en.line + ' ' + en.l)); // where a row line passes straight through
+    for (const t of trunks) {
+      t.ends = [[], []]; // the heights its stubs leave at on either edge; not where its row line passes anyway
+      const end = (y, edge) => {
+        if (!ends.has(y)) ends.set(y, [[], []]);
+        if (!ends.get(y)[edge].includes(t)) ends.get(y)[edge].push(t);
+        if (!level.has(t.line + ' ' + y) && !t.ends[edge].includes(y)) t.ends[edge].push(y);
+      };
+      for (const en of t.members) {
+        if (en.kind !== 2) end(en.l, 0);
+        if (en.kind === 1) end(en.r, 0);
+        if (en.kind !== 1) end(en.r, 1);
+        if (en.kind === 2) end(en.l, 1);
+      }
+    }
+    for (const [left, right] of ends.values()) for (const t of left) for (const o of right) {
+      if (o.line !== t.line && !t.before.includes(o)) { t.before.push(o); o.after.push(t); }
+    }
+    // Then the order in which the fewest stubs cross a trunk: with t left of o, o's stubs to
+    // the left edge cross t, and t's to the right edge cross o. From the order above, a trunk
+    // moves to the place that saves most, as long as one does (few trunks only: it is cubic).
+    if (trunks.length <= ROUTE.ORDER_MAX) {
+      const inside = (ys, t) => ys.reduce((n, y) => n + (y > t.lo && y < t.hi), 0);
+      const cost = trunks.map(t => trunks.map(o => o === t || o.line === t.line ? 0 : inside(o.ends[0], t) + inside(t.ends[1], o))); // cost[t][o]: crossings with t left of o
+      trunks.forEach((t, i) => t.id = i);
+      for (let moved = true, rounds = 0; moved && rounds < trunks.length; rounds++) {
+        moved = false;
+        for (let i = 0; i < trunks.length; i++) {
+          const t = trunks[i];
+          let best = 0, to = i, gain = 0;
+          for (let p = i - 1; p >= 0 && !t.after.includes(trunks[p]); p--) {
+            gain += cost[trunks[p].id][t.id] - cost[t.id][trunks[p].id];
+            if (gain > best) { best = gain; to = p; }
+          }
+          gain = 0;
+          for (let p = i + 1; p < trunks.length && !t.before.includes(trunks[p]); p++) {
+            gain += cost[t.id][trunks[p].id] - cost[trunks[p].id][t.id];
+            if (gain > best) { best = gain; to = p; }
+          }
+          if (to === i) continue;
+          trunks.splice(i, 1);
+          trunks.splice(to, 0, t);
+          moved = true;
+        }
+      }
+    }
+    trunks.forEach((t, at) => t.at = at);
+    const ready = new MinHeap(), ordered = [];
+    for (const t of trunks) if (!t.after.length) ready.push(t.at, t);
+    while (ordered.length < trunks.length) {
+      if (!ready.size) {
+        // Trunks that each must stand left of the next, round in a circle (an X of four level
+        // rows): one of them is cut in two. Its left ends keep the trunk, its right ends get
+        // one further right, and a stretch at a free height between joins the two: a second jog.
+        let t = trunks.find(t => !t.rank);
+        for (const seen = new Set(); !seen.has(t); t = t.after.find(o => !o.rank)) seen.add(t);
+        const heights = [...taken].filter(y => y >= t.lo && y <= t.hi).sort((a, b) => a - b);
+        let gap = 0;
+        for (let i = 1; i < heights.length; i++) if (heights[i] - heights[i - 1] > heights[gap + 1] - heights[gap]) gap = i - 1;
+        const mid = Math.floor((heights[gap] + heights[gap + 1]) / 2), far = { ...t, at: trunks.length, second: true, before: [], after: [...t.after, t], rank: 0 };
+        for (const o of t.after) o.before.splice(o.before.indexOf(t), 1, ...(mid > heights[gap] ? [far] : []));
+        t.after = [];
+        ready.push(t.at, t);
+        if (mid > heights[gap]) { // (no height free between: it stays one trunk, out of order)
+          taken.add(mid);
+          for (const en of t.members) en.mid = mid;
+          t.lo = Math.min(mid, ...t.members.map(en => en.l));
+          t.hi = Math.max(mid, ...t.members.map(en => en.l));
+          far.lo = Math.min(mid, ...t.members.map(en => en.r));
+          far.hi = Math.max(mid, ...t.members.map(en => en.r));
+          t.before.push(far);
+          trunks.push(far);
+        }
+      }
+      const t = ready.pop();
+      t.rank = -1;
+      ordered.push(t);
+      for (const o of t.before) if (o.after.every(p => p.rank)) ready.push(o.at, o);
+    }
+    // a trunk stands one track past the trunks before it that it overlaps (or nearly)
+    const heights = [...new Set(trunks.flatMap(t => [t.lo, t.hi]))].sort((a, b) => a - b), ranked = new RangeMax(heights.length);
+    const firstOver = v => { let lo = 0, hi = heights.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (heights[mid] > v) hi = mid; else lo = mid + 1; } return lo; };
+    const firstFrom = v => { let lo = 0, hi = heights.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (heights[mid] >= v) hi = mid; else lo = mid + 1; } return lo; };
+    let ranks = 0;
+    for (const t of ordered) {
+      t.rank = 1 + ranked.max(firstOver(t.lo - TRACK), firstFrom(t.hi + TRACK) - 1);
+      ranked.raise(firstFrom(t.lo), firstFrom(t.hi), t.rank);
+      ranks = Math.max(ranks, t.rank);
+    }
+    // centred in the channel, squeezed if it is narrow; in the two outside channels they hug the column
+    const xl = j ? cols[j - 1].xr : cols[0].xl - ROUTE.NEAR, xr = j < C ? cols[j].xl : cols[C - 1].xr + ROUTE.NEAR;
+    const step = ranks > 1 ? Math.min(TRACK, Math.max(2, Math.floor((xr - xl - 2 * STUB) / (ranks - 1)))) : 0;
+    const first = j === 0 ? xr - STUB - (ranks - 1) * step : j === C ? xl + STUB : (xl + xr - (ranks - 1) * step) >> 1;
+    for (const t of trunks) for (const en of t.members) en[t.second ? 'x2' : 'x'] = first + (t.rank - 1) * step;
+  });
+
+  // R7: the points. An arrow that touches a box after all (an obstacle, or a channel too
+  // narrow for its trunks) is searched for too.
+  const touches = pts => pts.some((q, i) => {
+    if (!i) return false;
+    const seg = [...pts[i - 1], ...q], lo = Math.min(seg[0], seg[2]), hi = Math.max(seg[0], seg[2]);
+    if (obstacles.some(b => segHitsRect(seg, b))) return true;
+    for (const col of cols) {
+      if (col.xr <= lo) continue;
+      if (col.xl >= hi) break;
+      if (seg[1] === seg[3] && !insideSpans(col.blocked, seg[1])) continue;
+      if (col.boxes.some(b => segHitsRect(seg, b))) return true;
+    }
+    return false;
+  });
+  order.forEach((e, i) => {
+    const p = plans[i], pts = [[p.sa ? e.a.x + e.a.w : e.a.x, e.sy]];
+    for (const { en, y0, y1 } of p.jogs) {
+      if (en.x2 === undefined) pts.push([en.x, y0], [en.x, y1]);
+      else if (y0 === en.l) pts.push([en.x, y0], [en.x, en.mid], [en.x2, en.mid], [en.x2, y1]);
+      else pts.push([en.x2, y0], [en.x2, en.mid], [en.x, en.mid], [en.x, y1]);
+    }
+    e.points = [...pts, [p.sb ? e.b.x + e.b.w : e.b.x, e.ty]];
+  });
+  return arrows.filter(e => !inLine(e) || touches(e.points));
+}
 
 // side: force a same-side loop ('L' or 'R'); used to try both sides of a self-reference
 function chooseSides(e, side = null) {
@@ -248,199 +710,238 @@ function chooseSides(e, side = null) {
   e.tx = e.x2 + (inn === 'L' ? -ROUTE.STUB : ROUTE.STUB);
 }
 
-function simplePath(e) {
-  const X = Math.round((e.sx + e.tx) / 2);
-  return [[e.x1, e.sy], [X, e.sy], [X, e.ty], [e.x2, e.ty]];
-}
-
-// The router's search arrays, kept between calls (it runs on every keystroke and drag frame).
+// The search arrays, kept between calls (routing runs on every keystroke and drag frame).
 // A cell's cost counts only if it was set in the current search (seen === stamp), so the
 // arrays don't have to be cleared before each search.
-const routeBuf = { g: new Float64Array(0), crosses: new Uint32Array(0), prev: new Int32Array(0), seen: new Uint32Array(0), stamp: 0 };
+const routeBuf = { g: new Float64Array(0), prev: new Int32Array(0), seen: new Uint32Array(0), stamp: 0 };
+// The routes the last call searched for (by FK row, with where its boxes stood): while tables
+// are dragged, only the arrows that changed are searched for again
+let searchedLast = new Map();
 
-function routeEdges(edges, boxes) {
-  if (!edges.length) return;
-  edges.forEach(e => chooseSides(e));
-  const { MARGIN, GRID, BEND, SHARE_OTHER, MERGE } = ROUTE;
-  // a self-reference can loop around either side: both are tried, the cheaper one wins
-  const SIDE_KEYS = ['x1', 'x2', 'outDir', 'inDir', 'sx', 'tx'];
-  const variants = e => e.a !== e.b ? [e] : ['L', 'R'].map(side => {
-    const v = { ...e };
-    chooseSides(v, side);
-    return v;
-  });
-  const allVariants = edges.flatMap(variants);
-
-  // Route on obstacle boundaries and port lanes, rather than filling empty
-  // space with a dense grid. Include box edges so no step can jump through a box.
-  const coords = values => {
-    const sorted = [...new Set(values)].sort((a, b) => a - b), out = new Set(sorted);
-    out.add(sorted[0] - 80); out.add(sorted[sorted.length - 1] + 80);
-    for (let i = 1; i < sorted.length; i++) {
-      const mid = Math.round((sorted[i - 1] + sorted[i]) / (2 * GRID)) * GRID;
-      if (mid > sorted[i - 1] && mid < sorted[i]) out.add(mid);
-    }
-    return [...out].sort((a, b) => a - b);
-  };
-  const xs = coords([...boxes.flatMap(b => [b.x - MARGIN, b.x, b.x + b.w, b.x + b.w + MARGIN]),
-    ...allVariants.flatMap(e => [e.sx, e.tx])]);
-  const ys = coords([...boxes.flatMap(b => [b.y - MARGIN, b.y, b.y + b.h, b.y + b.h + MARGIN]),
-    ...edges.flatMap(e => [e.sy, e.ty])]);
-  const nx = xs.length, ny = ys.length;
-  const xi = new Map(xs.map((v, i) => [v, i])), yi = new Map(ys.map((v, i) => [v, i]));
-
-  const blocked = new Uint8Array(nx * ny);
-  for (const b of boxes) {
-    for (let i = 0; i < nx; i++) {
-      if (xs[i] <= b.x - MARGIN || xs[i] >= b.x + b.w + MARGIN) continue;
-      for (let j = 0; j < ny; j++) {
-        if (ys[j] > b.y - MARGIN && ys[j] < b.y + b.h + MARGIN) blocked[j * nx + i] = 1;
-      }
-    }
+// The arrows the columns can't serve: A* on a grid of the box edges and rows in a window
+// around the arrow's two tables. A bend costs, crossing a line already drawn costs more, and
+// running along a line to another row is very expensive (it would look like it points
+// there); along one to the same row is cheap (they merge, drawn thicker).
+// The dragged tables' arrows go first, then the shortest. When the work allowed for one
+// call is done (WORK: boxes and lines looked at, grid cells, steps; counted, not timed, so
+// the same boxes always get the same routes), or there is no way, an arrow gets a plain
+// detour instead.
+function searchRoutes(arrows, edges, boxes, held) {
+  if (!arrows.length) return;
+  const last = searchedLast, pending = new Set(arrows), lineOf = new Map(), byX = [...boxes].sort((p, q) => p.x - q.x);
+  let work = ROUTE.WORK;
+  searchedLast = new Map();
+  for (const e of edges) if (!lineOf.has(e.to)) lineOf.set(e.to, lineOf.size + 1);
+  const where = e => [e.a.x, e.a.y, e.a.w, e.a.h, e.b.x, e.b.y, e.b.w, e.b.h, e.sy, e.ty].join();
+  const isHeld = e => held?.has(e.a) || held?.has(e.b) ? 1 : 0, todo = [];
+  for (const e of arrows) {
+    chooseSides(e);
+    const was = held && !isHeld(e) && last.get(e.from);
+    if (was?.where !== where(e)) { todo.push(e); continue; }
+    e.points = was.points;
+    searchedLast.set(e.from, was);
+    pending.delete(e);
   }
-
-  // The stub points next to each FK row and Id row belong to their arrows only
-  const reserved = new Map();
-  for (const e of allVariants) {
-    reserved.set(yi.get(e.sy) * nx + xi.get(e.sx), 'S:' + e.from);
-    reserved.set(yi.get(e.ty) * nx + xi.get(e.tx), 'T:' + e.to);
-  }
-  const used = new Map(); // "nodeA-nodeB" → set of targets whose arrows use that grid segment
-  const usedNodes = new Map(); // node → set of targets whose arrows pass it
-  const segKey = (p, q) => p < q ? p + '-' + q : q + '-' + p;
-  const DX = [1, -1, 0, 0], DY = [0, 0, 1, -1], REV = [1, 0, 3, 2];
-  const size = nx * ny * 4;
-  if (routeBuf.g.length < size) {
-    Object.assign(routeBuf, { g: new Float64Array(size), crosses: new Uint32Array(size), prev: new Int32Array(size), seen: new Uint32Array(size), stamp: 0 });
-  }
-  const { g, crosses, prev, seen } = routeBuf;
-
-  // short arrows first, so they get the direct lanes; self-references last, to see what's taken
   const len = e => e.a === e.b ? Infinity : Math.abs(e.sx - e.tx) + Math.abs(e.sy - e.ty);
-  const order = [...edges].sort((p, q) => (len(p) - len(q)) || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0));
-  for (const e of order) {
+  for (const e of todo.sort((p, q) => isHeld(q) - isHeld(p) || len(p) - len(q) || (p.from < q.from ? -1 : p.from > q.from ? 1 : 0))) {
+    // a self-reference can loop around either side: both are tried, the cheaper one wins
+    const sides = e.a !== e.b ? [e] : ['L', 'R'].map(side => {
+      const v = { ...e };
+      chooseSides(v, side);
+      return v;
+    });
     let best = null;
-    for (const v of variants(e)) {
-      const s = yi.get(v.sy) * nx + xi.get(v.sx), t = yi.get(v.ty) * nx + xi.get(v.tx);
-      const r = !blocked[s] && !blocked[t] ? astar(s, t, v) : null;
-      if (r && (!best || r.crossings < best.crossings || (r.crossings === best.crossings && r.cost < best.cost))) best = { ...r, v };
+    const grid = work > 0 && searchGrid(e, sides, edges, boxes, pending, lineOf);
+    pending.delete(e);
+    work -= grid ? grid.work : 0;
+    if (grid?.blocked) for (const v of sides) {
+      const r = astar(grid, v);
+      work -= r.steps;
+      if (r.nodes && !(best && best.cost <= r.cost)) best = { ...r, v };
     }
-    if (!best) { e.points = simplePath(e); continue; }
-    for (const k of SIDE_KEYS) e[k] = best.v[k];
-    const path = best.nodes;
-    for (let k = 1; k < path.length; k++) {
-      const key = segKey(path[k - 1], path[k]);
-      if (!used.has(key)) used.set(key, new Set());
-      used.get(key).add(e.to);
-    }
-    for (const n of path) {
-      if (!usedNodes.has(n)) usedNodes.set(n, new Set());
-      usedNodes.get(n).add(e.to);
-    }
-    const pts = [[e.x1, e.sy], ...path.map(n => [xs[n % nx], ys[Math.floor(n / nx)]]), [e.x2, e.ty]];
-    e.points = pts;
-  }
-  addJumps(edges);
-
-  function astar(s, t, e) {
-    const dir0 = e.outDir, dirEnd = e.inDir, myT = 'T:' + e.to;
-    // Running along an arrow to the same row is cheap (they merge into one line, drawn
-    // thicker); along one to another row is very expensive. Passing through a point another
-    // arrow uses, without running along it, is a crossing (a jump), whatever its target.
-    const shareCost = key => {
-      const u = used.get(key);
-      if (!u) return 0;
-      for (const to of u) if (to !== e.to) return SHARE_OTHER;
-      return -MERGE;
-    };
-    const crossCost = (n, key) => {
-      if (used.get(key)?.has(e.to)) return 0;
-      return usedNodes.get(n)?.size ? 1 : 0;
-    };
-    if (++routeBuf.stamp === 0xffffffff) { seen.fill(0); routeBuf.stamp = 1; }
-    const stamp = routeBuf.stamp;
-    const tx = xs[t % nx], ty = ys[Math.floor(t / nx)];
-    // Merged lanes cost less per pixel, so scale the heuristic to remain admissible.
-    const h = n => (1 - MERGE) * (Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty));
-    // Crossings take precedence over length and bends, as in auto layout.
-    const heap = new MinHeap((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const s0 = s * 4 + dir0;
-    g[s0] = 0;
-    crosses[s0] = 0;
-    prev[s0] = -1;
-    seen[s0] = stamp;
-    heap.push([0, h(s)], s0);
-    while (heap.size) {
-      const st = heap.pop();
-      const n = st >> 2, d = st & 3, gc = g[st];
-      if (n === t && d === dirEnd) {
-        const nodes = [];
-        for (let c = st; c !== -1; c = prev[c]) if (!nodes.length || nodes[nodes.length - 1] !== c >> 2) nodes.push(c >> 2);
-        return { nodes: nodes.reverse(), cost: gc, crossings: crosses[st] };
-      }
-      if (n === t) { // turn in place to leave the stub in the entry direction
-        relax(st, t * 4 + dirEnd, gc + BEND, crosses[st], 0);
-        continue;
-      }
-      const i = n % nx, j = Math.floor(n / nx);
-      for (let nd = 0; nd < 4; nd++) {
-        if (nd === REV[d]) continue;
-        const ii = i + DX[nd], jj = j + DY[nd];
-        if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
-        const m = jj * nx + ii;
-        if (blocked[m]) continue;
-        const r = reserved.get(m);
-        if (r && m !== t && r !== myT) continue;
-        const len = Math.abs(xs[ii] - xs[i]) + Math.abs(ys[jj] - ys[j]);
-        const key = segKey(n, m);
-        const cost = gc + len * (1 + shareCost(key)) + (nd === d ? 0 : BEND);
-        relax(st, m * 4 + nd, cost, crosses[st] + crossCost(m, key), h(m));
-      }
-    }
-    return null;
-
-    function relax(from, to, cost, nc, hh) {
-      if (seen[to] === stamp && (nc > crosses[to] || (nc === crosses[to] && cost >= g[to]))) return;
-      seen[to] = stamp;
-      g[to] = cost;
-      crosses[to] = nc;
-      prev[to] = from;
-      heap.push([nc, cost + hh], to);
-    }
+    if (best) {
+      for (const k of ['x1', 'x2', 'outDir', 'inDir', 'sx', 'tx']) e[k] = best.v[k];
+      e.points = [[e.x1, e.sy], ...best.nodes.map(n => [grid.xs[n % grid.nx], grid.ys[Math.floor(n / grid.nx)]]), [e.x2, e.ty]];
+    } else e.points = detour(e, byX);
+    searchedLast.set(e.from, { where: where(e), points: e.points });
   }
 }
 
-// Points of a route without the ones in the middle of straight runs
+// An arrow without the search: the elbow if that touches no box, else over or under the
+// boxes between its two tables; the one of the three that touches fewest boxes.
+// byX: the boxes sorted by x.
+function detour(e, byX) {
+  const loop = e.outDir !== e.inDir, X = !loop ? Math.round((e.sx + e.tx) / 2) : e.outDir ? Math.min(e.sx, e.tx) : Math.max(e.sx, e.tx);
+  const x0 = Math.min(e.x1, e.x2, X), x1 = Math.max(e.x1, e.x2, X), y0 = Math.min(e.sy, e.ty), y1 = Math.max(e.sy, e.ty);
+  let top = Math.min(e.a.y, e.b.y), bottom = Math.max(e.a.y + e.a.h, e.b.y + e.b.h);
+  for (const b of byX) {
+    if (b.x >= x1) break;
+    if (b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0) { top = Math.min(top, b.y); bottom = Math.max(bottom, b.y + b.h); }
+  }
+  top -= 2 * ROUTE.MARGIN;
+  bottom += 2 * ROUTE.MARGIN;
+  const round = y => [[e.x1, e.sy], [e.sx, e.sy], [e.sx, y], [e.tx, y], [e.tx, e.ty], [e.x2, e.ty]];
+  const ways = [[[e.x1, e.sy], [X, e.sy], [X, e.ty], [e.x2, e.ty]], ...(e.sy + e.ty - 2 * top <= 2 * bottom - e.sy - e.ty ? [top, bottom] : [bottom, top]).map(round)];
+  let best = null;
+  for (const way of ways) {
+    const lo = Math.min(...way.map(p => p[0])), hi = Math.max(...way.map(p => p[0]));
+    let n = 0;
+    for (const b of byX) {
+      if (b.x >= hi) break;
+      if (b.x + b.w > lo) for (let i = 1; i < way.length; i++) if (segHitsRect([way[i - 1][0], way[i - 1][1], way[i][0], way[i][1]], b)) n++;
+    }
+    if (!n) return way;
+    if (!best || n < best.n) best = { way, n };
+  }
+  return best.way;
+}
+
+// The grid an arrow is searched for on: lines along the edges (and a margin out) of the boxes
+// within WINDOW of its two tables and of the tables between them (there must be a way round
+// those), its rows, the lines already drawn there, and one between each two of those. Box
+// edges are included so no step can jump through a box.
+// along[2n] tells what runs from node n to the next one on its right, along[2n + 1] to the one
+// below it, at[n] what passes node n: 0 nothing, a row line's number, or -1 several of them.
+// The stub ends of the arrows still to be searched for (pending) are theirs alone.
+// work: what building it took; it comes without cells if there would be too many.
+function searchGrid(e, sides, edges, boxes, pending, lineOf) {
+  const { MARGIN, GRID, WINDOW } = ROUTE, span = bboxOf([e.a, e.b]), reach = bboxOf(boxes.filter(b => rectsTouch(b, span)));
+  const x0 = reach.x - WINDOW, y0 = reach.y - WINDOW, x1 = reach.x + reach.w + WINDOW, y1 = reach.y + reach.h + WINDOW;
+  const near = boxes.filter(b => b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0), drawn = [];
+  let work = 2 * boxes.length;
+  for (const o of edges) {
+    if (pending.has(o)) continue;
+    work += o.points.length;
+    for (let i = 1; i < o.points.length; i++) {
+      const [ax, ay] = o.points[i - 1], [bx, by] = o.points[i];
+      if (Math.min(ax, bx) > x1 || Math.max(ax, bx) < x0 || Math.min(ay, by) > y1 || Math.max(ay, by) < y0) continue;
+      const cut = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      drawn.push({ ax: cut(ax, x0, x1), ay: cut(ay, y0, y1), bx: cut(bx, x0, x1), by: cut(by, y0, y1), line: lineOf.get(o.to) });
+    }
+  }
+  const mine = (x, y) => sides.some(v => (x === v.sx && y === v.sy) || (x === v.tx && y === v.ty)), stubs = [];
+  for (const o of pending) {
+    for (const [x, y] of [[o.sx, o.sy], [o.tx, o.ty]]) if (!mine(x, y) && x > x0 && x < x1 && y > y0 && y < y1) stubs.push([x, y]);
+  }
+  const coords = (values, lo, hi) => {
+    const sorted = [...new Set([lo, hi, ...values.filter(v => v > lo && v < hi)])].sort((a, b) => a - b), out = [...sorted];
+    for (let i = 1; i < sorted.length; i++) {
+      const mid = Math.round((sorted[i - 1] + sorted[i]) / (2 * GRID)) * GRID;
+      if (mid > sorted[i - 1] && mid < sorted[i]) out.push(mid);
+    }
+    return out.sort((a, b) => a - b);
+  };
+  const xs = coords([...near.flatMap(b => [b.x - MARGIN, b.x, b.x + b.w, b.x + b.w + MARGIN]), ...sides.flatMap(v => [v.sx, v.tx]), ...drawn.flatMap(l => [l.ax, l.bx]), ...stubs.map(p => p[0])], x0, x1);
+  const ys = coords([...near.flatMap(b => [b.y - MARGIN, b.y, b.y + b.h, b.y + b.h + MARGIN]), e.sy, e.ty, ...drawn.flatMap(l => [l.ay, l.by]), ...stubs.map(p => p[1])], y0, y1);
+  const nx = xs.length, ny = ys.length;
+  if (nx * ny > ROUTE.CELLS) return { work };
+  const xi = new Map(xs.map((v, i) => [v, i])), yi = new Map(ys.map((v, i) => [v, i]));
+  const grid = { xs, ys, nx, ny, xi, yi, work: work + nx * ny, line: lineOf.get(e.to), blocked: new Uint8Array(nx * ny), along: new Int32Array(2 * nx * ny), at: new Int32Array(nx * ny) };
+  for (const b of near) {
+    for (let i = 0; i < nx; i++) {
+      if (xs[i] <= b.x - MARGIN || xs[i] >= b.x + b.w + MARGIN) continue;
+      for (let j = 0; j < ny; j++) if (ys[j] > b.y - MARGIN && ys[j] < b.y + b.h + MARGIN) grid.blocked[j * nx + i] = 1;
+    }
+  }
+  for (const [x, y] of stubs) grid.blocked[yi.get(y) * nx + xi.get(x)] = 1;
+  const mark = (list, i, line) => list[i] = list[i] === 0 || list[i] === line ? line : -1;
+  for (const l of drawn) {
+    const level = l.ay === l.by, i1 = xi.get(Math.max(l.ax, l.bx)), j1 = yi.get(Math.max(l.ay, l.by));
+    for (let i = xi.get(Math.min(l.ax, l.bx)), j = yi.get(Math.min(l.ay, l.by)); i <= i1 && j <= j1; level ? i++ : j++) {
+      mark(grid.at, j * nx + i, l.line);
+      if (level ? i < i1 : j < j1) mark(grid.along, 2 * (j * nx + i) + (level ? 0 : 1), l.line);
+    }
+  }
+  return grid;
+}
+
+// From the end of arrow e's first stub to the start of its last, in at most STEPS steps:
+// { nodes, cost, steps }, without nodes if there is no way
+function astar(grid, e) {
+  const { xs, ys, nx, ny, blocked, along, at, line } = grid, { BEND, CROSS, SHARE_OTHER, MERGE } = ROUTE;
+  const s = grid.yi.get(e.sy) * nx + grid.xi.get(e.sx), t = grid.yi.get(e.ty) * nx + grid.xi.get(e.tx);
+  if (blocked[s] || blocked[t]) return { steps: 0 };
+  const DX = [1, -1, 0, 0], DY = [0, 0, 1, -1], REV = [1, 0, 3, 2];
+  const size = nx * ny * 4;
+  if (routeBuf.g.length < size) Object.assign(routeBuf, { g: new Float64Array(size), prev: new Int32Array(size), seen: new Uint32Array(size), stamp: 0 });
+  const { g, prev, seen } = routeBuf;
+  if (++routeBuf.stamp === 0xffffffff) { seen.fill(0); routeBuf.stamp = 1; }
+  const stamp = routeBuf.stamp;
+  const tx = xs[t % nx], ty = ys[Math.floor(t / nx)];
+  // Merged lanes cost less per pixel, so scale the heuristic to remain admissible.
+  const h = n => (1 - MERGE) * (Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty));
+  const heap = new MinHeap();
+  const relax = (from, to, cost, hh) => {
+    if (seen[to] === stamp && cost >= g[to]) return;
+    seen[to] = stamp;
+    g[to] = cost;
+    prev[to] = from;
+    heap.push(cost + hh, to);
+  };
+  relax(-1, s * 4 + e.outDir, 0, h(s));
+  let steps = 0;
+  for (; heap.size && steps < ROUTE.STEPS; steps++) {
+    const st = heap.pop();
+    const n = st >> 2, d = st & 3, gc = g[st];
+    if (n === t && d === e.inDir) {
+      const nodes = [];
+      for (let c = st; c !== -1; c = prev[c]) if (!nodes.length || nodes[nodes.length - 1] !== c >> 2) nodes.push(c >> 2);
+      return { nodes: nodes.reverse(), cost: gc, steps };
+    }
+    if (n === t) { // turn in place to leave the stub in the entry direction
+      relax(st, t * 4 + e.inDir, gc + BEND, 0);
+      continue;
+    }
+    const i = n % nx, j = Math.floor(n / nx);
+    for (let nd = 0; nd < 4; nd++) {
+      if (nd === REV[d]) continue;
+      const ii = i + DX[nd], jj = j + DY[nd];
+      if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
+      const m = jj * nx + ii;
+      if (blocked[m]) continue;
+      // along its own row line a stretch is cheap and meets nothing; a node another line passes is a crossing
+      const run = along[2 * Math.min(n, m) + (nd > 1 ? 1 : 0)], share = run === 0 ? 0 : run === line ? -MERGE : SHARE_OTHER;
+      const len = Math.abs(xs[ii] - xs[i]) + Math.abs(ys[jj] - ys[j]);
+      relax(st, m * 4 + nd, gc + len * (1 + share) + (nd === d ? 0 : BEND) + (run !== line && at[m] !== 0 && at[m] !== line ? CROSS : 0), h(m));
+    }
+  }
+  return { steps };
+}
+
+// The corners of a route: no repeated points, none in the middle of a straight run
 function simplify(points) {
   return points.filter((q, i) => {
     if (i === 0 || i === points.length - 1) return true;
     const a = points[i - 1], b = points[i + 1];
+    if (a[0] === q[0] && a[1] === q[1]) return false;
     return !((a[0] === q[0] && q[0] === b[0]) || (a[1] === q[1] && q[1] === b[1]));
   });
 }
 
 // Where arrows cross, the horizontal line jumps over the vertical one with a small arch.
-// Only real crossings count: a line that just ends on another (merging into the same
-// Id row) is not a crossing. Next to a corner, the corner's rounding shrinks to make room.
+// Only real crossings count: a line that just ends on another is not one, and neither is
+// meeting a line to the same row. Next to a corner, the corner's rounding shrinks to make room.
 const JUMP_R = 5;
 function addJumps(edges) {
   const simple = edges.map(e => simplify(e.points));
   const verticals = simple.flatMap((p, k) => p.slice(1).flatMap((q, i) =>
-    p[i][0] === q[0] ? [{ k, x: q[0], y0: Math.min(p[i][1], q[1]), y1: Math.max(p[i][1], q[1]) }] : []));
+    p[i][0] === q[0] ? [{ to: edges[k].to, x: q[0], y0: Math.min(p[i][1], q[1]), y1: Math.max(p[i][1], q[1]) }] : []))
+    .sort((u, w) => u.x - w.x);
+  const firstOver = x => { let lo = 0, hi = verticals.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (verticals[mid].x > x) hi = mid; else lo = mid + 1; } return lo; };
   edges.forEach((e, k) => {
     const p = simple[k], jumps = [];
     for (let i = 1; i < p.length; i++) {
-      const [ax, ay] = p[i - 1], [bx, by] = p[i];
-      if (ay !== by) { jumps.push([]); continue; }
-      const lo = Math.min(ax, bx) + JUMP_R + 1, hi = Math.max(ax, bx) - JUMP_R - 1;
-      const xs = verticals
-        .filter(v => v.k !== k && v.x > lo && v.x < hi && ay > v.y0 + 1 && ay < v.y1 - 1)
-        .map(v => v.x)
-        .sort((u, w) => (bx > ax ? u - w : w - u))
-        .filter((x, j, arr) => !j || Math.abs(x - arr[j - 1]) > 2 * JUMP_R + 2); // no overlapping jumps
+      const [ax, ay] = p[i - 1], [bx, by] = p[i], xs = [];
+      if (ay === by) {
+        const hi = Math.max(ax, bx) - JUMP_R - 1;
+        for (let v = firstOver(Math.min(ax, bx) + JUMP_R + 1); v < verticals.length && verticals[v].x < hi; v++) {
+          const s = verticals[v];
+          if (s.to !== e.to && ay > s.y0 + 1 && ay < s.y1 - 1 && !(xs.length && s.x - xs[xs.length - 1] <= 2 * JUMP_R + 2)) xs.push(s.x); // no overlapping jumps
+        }
+        if (bx < ax) xs.reverse();
+      }
       jumps.push(xs);
     }
-    e.jumps = jumps.reduce((n, xs) => n + xs.length, 0);
     e.d = pathD(p, jumps);
   });
 }
@@ -495,6 +996,32 @@ class MinHeap {
       k[i] = lk; v[i] = lv;
     }
     return top;
+  }
+}
+
+// Slots that only ever rise: raise() lifts a run of them to at least a value, max() is the
+// highest in a run. A segment tree: under[i] is the highest slot below node i, whole[i] what
+// all of them were raised to at once.
+class RangeMax {
+  constructor(slots) {
+    this.n = 1;
+    while (this.n < slots) this.n *= 2;
+    this.under = new Int32Array(2 * this.n);
+    this.whole = new Int32Array(2 * this.n);
+  }
+  raise(lo, hi, v, i = 1, a = 0, b = this.n - 1) {
+    if (hi < a || b < lo) return;
+    this.under[i] = Math.max(this.under[i], v);
+    if (lo <= a && b <= hi) { this.whole[i] = Math.max(this.whole[i], v); return; }
+    const mid = (a + b) >> 1;
+    this.raise(lo, hi, v, 2 * i, a, mid);
+    this.raise(lo, hi, v, 2 * i + 1, mid + 1, b);
+  }
+  max(lo, hi, i = 1, a = 0, b = this.n - 1) {
+    if (hi < a || b < lo) return 0;
+    if (lo <= a && b <= hi) return this.under[i];
+    const mid = (a + b) >> 1;
+    return Math.max(this.whole[i], this.max(lo, hi, 2 * i, a, mid), this.max(lo, hi, 2 * i + 1, mid + 1, b));
   }
 }
 
@@ -566,13 +1093,15 @@ function computeGeometry() {
     return [t, { x: pos[t.name].x, y: pos[t.name].y, w: d.w, h: d.h, rows: d.rows, data: d.data }];
   }));
   const edges = state.dataView ? [] : diagramEdges(tables, boxes);
-  routeEdges(edges, [...boxes.values()]);
+  const held = drag?.kind === 'box' && drag.moved ? new Set(tables.filter(t => drag.start[t.name]).map(t => boxes.get(t))) : null;
+  routeEdges(edges, [...boxes.values()], held);
   if ((state.notation === 'uml' || state.notation === 'ratio') && !state.dataView) placeLabels(edges);
   geometry = { boxes, edges, dims, bundles: bundles(edges) };
 }
 
 // Where several arrows run along the same stretch, that stretch is drawn thicker:
-// 2 arrows twice the width, 3 three times, and so on. Returns [{ x1, y1, x2, y2, n }].
+// 2 arrows twice the width, 3 or more three times (the bus of a table fifty others
+// reference would be a wall). Returns [{ x1, y1, x2, y2, n }].
 // A stretch stops short of the arrowheads and start circles, so they stay visible.
 function bundles(edges) {
   const lines = new Map(); // "h:y" / "v:x" → [{ a, b, k }] intervals along that line
@@ -600,7 +1129,7 @@ function bundles(edges) {
     };
     for (let i = 1; i < cuts.length; i++) {
       const a = cuts[i - 1], b = cuts[i];
-      const n = new Set(ivs.filter(v => v.a <= a && v.b >= b).map(v => v.k)).size;
+      const n = Math.min(3, new Set(ivs.filter(v => v.a <= a && v.b >= b).map(v => v.k)).size);
       if (run && run.n === n && run.b === a) run.b = b;
       else { flush(); run = { a, b, n }; }
     }
@@ -615,7 +1144,7 @@ function diagramEdges(tables, boxes) {
   for (const t of tables) {
     shownCols(t).forEach((c, i) => {
       if (!c.target) return;
-      const a = boxes.get(t), b = boxes.get(c.target);
+      const a = boxes.get(t), b = boxes.get(c.target), row = b.y + rowY(shownCols(c.target).indexOf(c.targetCol));
       edges.push({
         a, b,
         fromTable: t.name, toTable: c.target.name,
@@ -627,12 +1156,12 @@ function diagramEdges(tables, boxes) {
         from: t.name + '.' + c.name,
         to: c.target.name + '.' + c.targetCol.name,
         sy: a.y + rowY(i),
-        ty: b.y + rowY(shownCols(c.target).indexOf(c.targetCol)),
+        ty: row, row,
       });
     });
   }
   // In the ER notations each arrow's "one" end has its own symbol, so arrows that point
-  // at the same row are spread a little apart instead of meeting in one point
+  // at the same row are spread a little apart instead of meeting in one point (ty moves, row stays)
   if (state.notation !== 'arrows') {
     const byTarget = new Map();
     for (const e of edges) (byTarget.get(e.to) ?? byTarget.set(e.to, []).get(e.to)).push(e);
@@ -1000,6 +1529,7 @@ svg.addEventListener('pointermove', e => {
 });
 function endDrag() {
   if (!drag) return;
+  const dropped = drag.kind === 'box' && drag.moved;
   if (drag.kind === 'box') {
     if (drag.moved) { saveDoc(); histCommit(); }
     else {
@@ -1013,6 +1543,7 @@ function endDrag() {
   else if (drag.kind === 'pan' && !drag.moved) setSelected([]);
   svg.classList.remove('panning', 'dragging');
   drag = null;
+  if (dropped) drawDiagram(); // while it was dragged, only the dragged tables' arrows were searched for
 }
 svg.addEventListener('pointerup', endDrag);
 svg.addEventListener('pointercancel', endDrag);

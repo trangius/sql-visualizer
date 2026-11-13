@@ -71,8 +71,13 @@ The **Syntax** button in the app has the same reference.
 
 Open `index.html` in your browser. No installation or build step needed.
 
-Run `node test/layout-check.js` to check layout and routing, including crossings,
-table spacing, declaration order, canvas sizes, and relationship notations.
+Run `node test/layout-check.js` to check layout and routing on the schemas in
+`test/layout-corpus.js`: no overlapping tables, no line through a table, crossings,
+declaration order, canvas shapes, relationship notations, time limits, and the expected
+result of each schema in `test/fixtures/layout_golden.txt` (`--write` rewrites that file
+after a wanted change). It also lays out random schemas and drags tables about at random
+(`--fuzz 2500` for many more of both). `node test/layout-shots.js <directory>` takes
+screenshots of the real page in headless Chrome, to look at a layout.
 
 ## Screenshots
 

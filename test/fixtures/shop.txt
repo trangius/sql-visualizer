@@ -1,0 +1,110 @@
+Users
+  Id
+  Email unique
+  Name
+  CreatedAt datetime
+Roles
+  Id
+  Name
+UserRoles
+  UserId -> Users
+  RoleId -> Roles
+  pk (UserId, RoleId)
+Sessions
+  Id
+  UserId -> Users
+  Token
+  ExpiresAt datetime
+Addresses
+  Id
+  UserId -> Users
+  CountryId -> Countries
+  Street
+  City
+Countries
+  Id
+  Name
+  Code vc(2)
+Categories
+  Id
+  Name
+  ParentId null -> Categories
+Products
+  Id
+  Name
+  CategoryId -> Categories
+  SupplierId -> Suppliers
+  Price decimal(8,2)
+Suppliers
+  Id
+  Name
+  CountryId -> Countries
+ProductImages
+  Id
+  ProductId -> Products
+  Url
+Reviews
+  Id
+  ProductId -> Products
+  UserId -> Users
+  Rating int
+  Body text
+Warehouses
+  Id
+  Name
+  AddressId -> Addresses
+Inventory
+  ProductId -> Products
+  WarehouseId -> Warehouses
+  Quantity int
+  pk (ProductId, WarehouseId)
+Carts
+  Id
+  UserId -> Users
+CartItems
+  CartId -> Carts
+  ProductId -> Products
+  Quantity int
+  pk (CartId, ProductId)
+Orders
+  Id
+  UserId -> Users
+  ShippingAddressId -> Addresses
+  StatusId -> OrderStatus
+  CouponId null -> Coupons
+  CreatedAt datetime
+OrderStatus
+  Id
+  Name
+OrderItems
+  Id
+  OrderId -> Orders
+  ProductId -> Products
+  Quantity int
+  UnitPrice decimal(8,2)
+Coupons
+  Id
+  Code unique
+  Percent int
+Payments
+  Id
+  OrderId -> Orders
+  MethodId -> PaymentMethods
+  Amount decimal(8,2)
+PaymentMethods
+  Id
+  Name
+Shipments
+  Id
+  OrderId -> Orders
+  WarehouseId -> Warehouses
+  CarrierId -> Carriers
+  ShippedAt datetime null
+Carriers
+  Id
+  Name
+AuditLog
+  Id
+  UserId null -> Users
+  Action
+  At datetime
