@@ -242,6 +242,7 @@ function ensurePositions(tables, dims) {
 // searched for, with A* on a grid around its two tables.
 const ROUTE = {
   STUB: 20, TRACK: 16,                 // from a box to the first vertical run; between two runs
+  STREET: 80,                          // two rows of tables are at least this far apart
   CH_MIN: 20, CLEAR: 10, LANE_MIN: 8,  // the narrowest channel; a line's distance to a box, and to another row line in a column
   NEAR: 100,                           // how far outside its tables a group's lines go: other tables that near share its columns
   GAP_TRIES: 8, SIDE_DETOUR: 400, BUDGET: 2e6, ORDER_MAX: 48,
@@ -373,7 +374,42 @@ function routeGroup(arrows, members) {
   // kind 1 a loop on the left edge and kind 2 one on the right edge (l to r its span).
   const channels = Array.from({ length: C + 1 }, () => []), mates = channels.map(() => new Map()); // mates: a channel's entries by row line
   const middle = channels.map((_, j) => j === 0 ? cols[0].xl - STUB : j === C ? cols[C - 1].xr + STUB : (cols[j - 1].xr + cols[j].xl) >> 1);
-  let budget = ROUTE.BUDGET;
+  let budget = ROUTE.BUDGET, scans = ROUTE.BUDGET; // the work left for counting crossings, and for looking through streets
+  // The stretches of height in which tables of the group stand, and between them its streets:
+  // a STREET's height (less the CLEAR on either side) with no table in it. One table may be
+  // in a street, or reach into it from the stretch over or under it, if tables stand side by
+  // side there: a table dragged into a street is in the way of its own column only.
+  // A stretch is a row if three of its tables stand level, and reaches across the group if it
+  // has tables in all its columns but one. With two rows that do, or one and the beginning of
+  // another (three columns or more in a run from either end, or one in from it), the tables
+  // stand in rows, as Auto layout folds a long chain: such a group has many lines that pass
+  // tables on their way, so they are given the free heights of the streets (R4) and the free
+  // tracks of a channel (R6) where the order they would have has no room.
+  // A stretch: its top and bottom; its columns: how many, the first, the last; its next
+  // lowest end, and the top of the table that ends lowest; the last top, and how many at it
+  const stood = [], column = new Int32Array(C).fill(-1), street = ROUTE.STREET - 2 * ROUTE.CLEAR;
+  const spans = cols.flatMap((col, c) => col.blocked.map(([lo, hi]) => [lo, hi, c])).sort((p, q) => p[0] - q[0]);
+  let across = 0, begun = 0;
+  spans.forEach(([lo, hi, c], i) => {
+    const under = i + 1 < spans.length ? spans[i + 1][0] : Infinity, under2 = i + 2 < spans.length ? spans[i + 2][0] : Infinity;
+    let s = stood[stood.length - 1], top = lo;
+    if (s && s[1] <= lo && under >= hi && under - s[1] >= street && s[1] - s[5] < street && under2 - under < street) return; // this table is in the street
+    if (s && lo - s[1] < street) {
+      if (lo - s[5] >= street && s[6] < s[5]) { s[1] = s[5]; s = null; }        // the table that ends lowest reaches into the street
+      else if (under - s[1] >= street && hi > under) { top = under; s = null; } // this one reaches up into it
+    } else s = null;
+    if (!s) stood.push(s = [top, hi, 0, c, c, -Infinity, lo, lo, 0]);
+    else if (hi > s[1]) { s[5] = s[1]; s[1] = hi; s[6] = lo; }
+    else s[5] = Math.max(s[5], hi);
+    if (column[c] !== stood.length) { column[c] = stood.length; s[2]++; s[3] = Math.min(s[3], c); s[4] = Math.max(s[4], c); }
+    if (lo !== s[7]) { s[7] = lo; s[8] = 0; }
+    if (++s[8] === 3) s[9] = true;
+  });
+  for (const [, , count, first, last, , , , , level] of stood) {
+    if (level && count >= Math.max(3, C - 1)) across++;
+    else if (level && count === last - first + 1 && (first <= 1 || last >= C - 2)) begun++;
+  }
+  const inRows = across > 1 || (across === 1 && begun > 0);
 
   // R3: a height is free in a column for a row line when no box is there and no other row line runs near it
   const free = (c, y, line) => {
@@ -462,16 +498,46 @@ function routeGroup(arrows, members) {
       return build([[best, e.row]], least);
     }
     // Two jogs, with a height between that is free in the columns neither row can pass: a gap
-    // between the boxes of the first of them, near the two rows; else above or below them all.
+    // between the boxes of the first of them, near the two rows (among rows of tables a
+    // street between two rows); else above or below them all.
     // In a gap it keeps another CLEAR from the boxes where there is room, not to run along an edge.
     const clear = y => { for (let i = F; i < k - G; i++) if (!free(colAt(i), y, line)) return false; return true; };
     const far = y => Math.abs(y - e.sy) + Math.abs(y - e.row), want = Math.floor((e.sy + e.row) / 2), spans = cols[colAt(F)].blocked, tries = [];
-    for (let i = 0; i + 1 < spans.length; i++) {
+    const nearest = (a, b) => far(a) - far(b) || Math.abs(a - want) - Math.abs(b - want);
+    // the room for a line between two of these stretches: from lo to hi, and the height in it nearest the middle
+    const gap = (spans, i) => {
       const room = Math.min(ROUTE.CLEAR, Math.floor((spans[i + 1][0] - spans[i][1]) / 2)), lo = spans[i][1] + room, hi = spans[i + 1][0] - room;
-      if (hi - lo >= 0 && spans[i + 1][0] - spans[i][1] >= 1) tries.push(Math.max(lo, Math.min(hi, want)), Math.floor((lo + hi) / 2));
+      return hi - lo >= 0 && spans[i + 1][0] - spans[i][1] >= 1 ? [Math.max(lo, Math.min(hi, want)), lo, hi] : null;
+    };
+    let between;
+    if (!inRows) {
+      for (let i = 0; i + 1 < spans.length; i++) {
+        const g = gap(spans, i);
+        if (g) tries.push(g[0], Math.floor((g[1] + g[2]) / 2));
+      }
+      between = tries.sort(nearest).slice(0, ROUTE.GAP_TRIES).find(clear);
+    } else {
+      // Among rows of tables: a street, the nearest first, which is the nearer of the next one
+      // up and the next one down. In it the heights LANE_MIN apart from its top (so two lines
+      // of a street are level or apart), outward from the one nearest the middle, while the
+      // work allows
+      let begun = 0, above = null, below = null; // begun: the stretches that begin at the middle or over it
+      while (begun < stood.length && stood[begun][0] <= want) begun++;
+      scan: for (let up = begun - 2, down = Math.max(0, begun - 1); ;) {
+        while (!above && up >= 0) above = gap(stood, up--);
+        while (!below && down + 1 < stood.length) below = gap(stood, down++);
+        if (!above && !below) break;
+        const upper = above && (!below || nearest(above[0], below[0]) <= 0), [near, lo, hi] = upper ? above : below;
+        if (upper) above = null; else below = null;
+        const last = Math.floor((hi - lo) / ROUTE.LANE_MIN), first = Math.round((near - lo) / ROUTE.LANE_MIN);
+        for (let i = 0; i <= 2 * last; i++) {
+          const at = first + (i % 2 ? (i + 1) >> 1 : -(i >> 1));
+          if (at < 0 || at > last) continue;
+          if ((scans -= k - G - F) < 0) break scan;
+          if (clear(lo + at * ROUTE.LANE_MIN)) { between = lo + at * ROUTE.LANE_MIN; break scan; }
+        }
+      }
     }
-    tries.sort((a, b) => far(a) - far(b) || Math.abs(a - want) - Math.abs(b - want));
-    let between = tries.slice(0, ROUTE.GAP_TRIES).find(clear);
     if (between === undefined) {
       let top = Infinity, bottom = -Infinity;
       for (let i = F; i < k - G; i++) {
@@ -656,14 +722,30 @@ function routeGroup(arrows, members) {
     const heights = [...new Set(trunks.flatMap(t => [t.lo, t.hi]))].sort((a, b) => a - b), ranked = new RangeMax(heights.length);
     const firstOver = v => { let lo = 0, hi = heights.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (heights[mid] > v) hi = mid; else lo = mid + 1; } return lo; };
     const firstFrom = v => { let lo = 0, hi = heights.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (heights[mid] >= v) hi = mid; else lo = mid + 1; } return lo; };
+    const xl = j ? cols[j - 1].xr : cols[0].xl - ROUTE.NEAR, xr = j < C ? cols[j].xl : cols[C - 1].xr + ROUTE.NEAR;
+    const tracks = Math.floor((xr - xl - 2 * STUB) / TRACK) + 1; // as many fit the channel a track apart
     let ranks = 0;
     for (const t of ordered) {
       t.rank = 1 + ranked.max(firstOver(t.lo - TRACK), firstFrom(t.hi + TRACK) - 1);
       ranked.raise(firstFrom(t.lo), firstFrom(t.hi), t.rank);
       ranks = Math.max(ranks, t.rank);
     }
+    // Among rows of tables (see `stood`), a channel with too few tracks for that packs its
+    // trunks instead: from the top down, each on the first track free where it runs, right
+    // of the trunks it must stand right of
+    if (ranks > tracks && inRows) {
+      const waits = trunks.map(t => t.after.length);
+      ranks = 0;
+      for (const t of trunks) { t.rank = 0; if (!t.after.length) ready.push(t.lo * trunks.length + t.at, t); }
+      while (ready.size) {
+        const t = ready.pop(), taken = new Set();
+        for (const o of trunks) if (o.rank && o.hi > t.lo - TRACK && o.lo < t.hi + TRACK) taken.add(o.rank);
+        for (t.rank = 1 + t.after.reduce((r, o) => Math.max(r, o.rank), 0); taken.has(t.rank); t.rank++);
+        ranks = Math.max(ranks, t.rank);
+        for (const o of t.before) if (!--waits[o.at]) ready.push(o.lo * trunks.length + o.at, o);
+      }
+    }
     // centred in the channel, squeezed if it is narrow; in the two outside channels they hug the column
-    const xl = j ? cols[j - 1].xr : cols[0].xl - ROUTE.NEAR, xr = j < C ? cols[j].xl : cols[C - 1].xr + ROUTE.NEAR;
     const step = ranks > 1 ? Math.min(TRACK, Math.max(2, Math.floor((xr - xl - 2 * STUB) / (ranks - 1)))) : 0;
     const first = j === 0 ? xr - STUB - (ranks - 1) * step : j === C ? xl + STUB : (xl + xr - (ranks - 1) * step) >> 1;
     for (const t of trunks) for (const en of t.members) en[t.second ? 'x2' : 'x'] = first + (t.rank - 1) * step;
@@ -1496,16 +1578,28 @@ function diagramVisible() {
   return x0 >= 0 && y0 >= CARD_TOP - 20 && x0 + bb.w * view.s <= r.width && y0 + bb.h * view.s <= r.height - CARD_BOTTOM + 20;
 }
 
+// The middle of the table nearest the middle of all the tables' area
+function contentMiddle() {
+  const bs = [...geometry.boxes.values()], mid = b => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+  let area = 0, x = 0, y = 0;
+  for (const b of bs) { area += b.w * b.h; x += b.w * b.h * mid(b).x; y += b.w * b.h * mid(b).y; }
+  const far = b => (mid(b).x - x / area) ** 2 + (mid(b).y - y / area) ** 2;
+  return mid(bs.reduce((p, q) => far(q) < far(p) ? q : p));
+}
+
 // keepZoom: stay at the current zoom if the whole diagram fits at it (just centre it)
 function fit(maxZoom = 1.25, keepZoom = false) {
   const r = svg.getBoundingClientRect();
   const bb = contentBounds(20);
   if (!r.width) return;
   if (!bb) { view.s = 1; view.tx = 40; view.ty = 80; applyView(); return; }
-  const s = Math.min(maxZoom, (r.width - 96) / bb.w, (r.height - CARD_TOP - CARD_BOTTOM - 30) / bb.h);
+  const sw = (r.width - 96) / bb.w, sh = (r.height - CARD_TOP - CARD_BOTTOM - 30) / bb.h, s = Math.min(maxZoom, sw, sh);
   view.s = keepZoom && view.s <= s ? view.s : Math.max(ZOOM_MIN, s);
-  view.tx = (r.width - bb.w * view.s) / 2 - bb.x * view.s;
-  view.ty = CARD_TOP + (r.height - CARD_TOP - CARD_BOTTOM - bb.h * view.s) / 2 - bb.y * view.s;
+  // Centred; where it is too big even at the least zoom, on a table in the middle of where
+  // the tables are: the middle of all it spans may be empty
+  const mid = contentMiddle();
+  view.tx = r.width / 2 - (sw < ZOOM_MIN ? mid.x : bb.x + bb.w / 2) * view.s;
+  view.ty = CARD_TOP + (r.height - CARD_TOP - CARD_BOTTOM) / 2 - (sh < ZOOM_MIN ? mid.y : bb.y + bb.h / 2) * view.s;
   applyView();
 }
 

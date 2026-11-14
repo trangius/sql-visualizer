@@ -8,7 +8,7 @@
 // runs the same layout, gets the same golden file.
 const assert = require('assert/strict'), fs = require('fs'), path = require('path');
 const api = require('./layout-load')();
-const corpus = require('./layout-corpus')(api.EXAMPLES), { scrambled, moved } = require('./layout-corpus');
+const corpus = require('./layout-corpus')(api.EXAMPLES), { scrambled, long, moved } = require('./layout-corpus');
 const FUZZ = process.argv.includes('--fuzz') ? +process.argv[process.argv.indexOf('--fuzz') + 1] : 120;
 const GOLDEN = path.join(__dirname, 'fixtures/layout_golden.txt');
 const BOX_W = 190, boxH = t => 50 + 30 * api.shownCols(t).length;
@@ -121,6 +121,23 @@ function metrics({ boxes, edges }) {
   return m;
 }
 
+// The least distance between two upright stretches of different row lines that run beside
+// each other; a track if none are nearer
+function trunksApart({ edges }) {
+  const upright = edges.flatMap(e => {
+    const p = api.simplify(e.points);
+    return p.slice(1).flatMap(([x, y], i) => x === p[i][0] ? [{ x, a: Math.min(y, p[i][1]), b: Math.max(y, p[i][1]), to: e.to }] : []);
+  }).sort((p, q) => p.x - q.x);
+  let least = api.ROUTE.TRACK;
+  upright.forEach((s, i) => {
+    for (let k = i + 1; k < upright.length && upright[k].x - s.x < least; k++) {
+      const o = upright[k];
+      if (o.x > s.x && o.to !== s.to && Math.min(s.b, o.b) > Math.max(s.a, o.a)) least = o.x - s.x;
+    }
+  });
+  return least;
+}
+
 function validate(r, name) {
   const rects = [...r.boxes.values()], m = metrics(r);
   for (const b of rects) assert([b.x, b.y].every(v => Number.isFinite(v) && v % 10 === 0), `${name}: a table off the grid`);
@@ -162,10 +179,11 @@ function sound(text, options, name) {
 // Every schema of the corpus: sound at three canvas shapes, in time, and as the golden file says
 const golden = [];
 console.log('schema         tables lines crossings bends/line  mean longest       size  layout   route ms');
-for (const { name, text, limit, crosses } of corpus) {
+for (const { name, text, limit, crosses, rows } of corpus) {
   for (const aspect of [0.8, 2.25, 1.5]) {
     const { r, m } = sound(text, { aspect }, name);
     if (!crosses) assert.equal(m.crossings, 0, `${name}: lines cross`);
+    if (rows) assert.equal(trunksApart(r), api.ROUTE.TRACK, `${name}: trunks squeezed into a channel`);
     if (aspect !== 1.5) continue;
     let layoutMs = r.layoutMs, routeMs = r.routeMs;
     for (let i = 0; i < 4; i++) {
@@ -203,6 +221,10 @@ for (let seed = 1; seed <= FUZZ; seed++) {
   for (const options of [{}, { measured: true }, { measured: true, notation: 'crowsfoot' }, { measured: true, keysOnly: true, aspect: 0.8 }, { aspect: 2.25, notation: 'uml' }]) {
     sound(scrambled(seed), options, `random schema ${seed} ${JSON.stringify(options)}`);
   }
+}
+// Random long schemas, whose layers fold into rows
+for (let seed = 1; seed <= FUZZ / 4; seed++) {
+  for (const options of [{}, { measured: true, aspect: 0.8 }]) sound(long(seed), options, `long schema ${seed} ${JSON.stringify(options)}`);
 }
 // Data view draws no arrows: the boxes go on shelves
 {
@@ -265,6 +287,17 @@ for (const [boxes, links] of [
   [{ X: box(-280, 0, 190, 140), A: box(0, 0, 190, 140), B: box(280, 0, 190, 140), Y: box(560, 0, 190, 140) }, [['X', 'A', 1, 1], ['B', 'Y', 1, 1], ['A', 'B', 2], ['B', 'A', 2]]],
   [{ A: box(0, 0, 190, 200), B: box(280, 60, 190, 200) }, [['A', 'B', 3], ['A', 'B', 4, 1], ['B', 'B', 4, 1]]],
 ]) assert.equal(route(boxes, links).searched, 0);
+
+// Two rows of tables a street apart: the lines that pass a column run in the street, as many as
+// there are, and still do when a table of the lower row is dragged up into it
+{
+  const boxes = Object.fromEntries([0, 1, 2, 3].flatMap(c => [['A' + c, box(280 * c, 0)], ['B' + c, box(280 * c, 210)]]));
+  const links = [['A0', 'B2'], ['A0', 'B3', 1], ['B0', 'A2', 0, 1], ['B0', 'A3', 1, 1]];
+  const between = r => r.edges.every(e => e.points.every(([, y]) => y >= 0 && y <= 320));
+  assert(between(route(boxes, links)), 'rows: a line leaves the street');
+  boxes.B1.y -= 40;
+  assert(between(route(boxes, links)), 'rows, a table dragged into the street: a line leaves it');
+}
 
 // Tables that have a spot keep it: a dragged table stays where it was put, a new table finds
 // a spot of its own, many new ones are laid out as a block beside the diagram

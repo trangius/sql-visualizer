@@ -2,7 +2,8 @@
 
 // The schemas the layout is measured on (Squill's suite has the same ones), as Simple
 // syntax: the fixtures and examples, and generated ones. limit: ms for layout and routing;
-// crosses: lines may cross in it (in the others none does).
+// crosses: lines may cross in it (in the others none does); rows: its layers fold into rows,
+// whose channels have a track for every trunk.
 const fs = require('fs'), path = require('path');
 const fixture = name => fs.readFileSync(path.join(__dirname, 'fixtures', name + '.txt'), 'utf8');
 
@@ -46,6 +47,15 @@ function scattered(n, fks, seed) {
     }
   });
 }
+// a chain whose tables each reference a random earlier table too
+function backlinked(n, seed) {
+  const r = random(seed);
+  return generate(n, fk => { for (let i = 1; i < n; i++) { fk(i, i - 1); fk(i, r.pick(i)); } });
+}
+// a chain whose middle table has `more` columns more
+const tall = (n, more) => generate(n, (fk, extra) => { for (let i = 1; i < n; i++) fk(i, i - 1); extra(n >> 1, more); });
+// a chain, and tables that reference only its middle table
+const hubbed = (n, leaves) => generate(n + leaves, fk => { for (let i = 1; i < n; i++) fk(i, i - 1); for (let i = 0; i < leaves; i++) fk(n + i, n >> 1); });
 // groups of 1 to 6 tables, each table referencing an earlier one of its group
 function islands(groups, seed) {
   const r = random(seed), pairs = [];
@@ -89,6 +99,19 @@ function scrambled(seed) {
   }
   return tables.join('\n');
 }
+// A long schema, for seed 1, 2, 3…: most tables reference one a few before them, some one
+// far back too, so its layers fold into rows; in some, tables of very different heights
+function long(seed) {
+  const r = random(seed * 2654435761), n = 15 + r.pick(seed % 5 === 0 ? 400 : 90), near = 1 + r.pick(4), back = r.pick(4), tall = r.pick(3) === 0;
+  return generate(n, (fk, extra) => {
+    for (let i = 1; i < n; i++) {
+      fk(i, Math.max(0, i - 1 - r.pick(near)));
+      if (r.pick(4) < back) fk(i, r.pick(i));
+      if (r.pick(6) === 0) fk(i, Math.max(0, i - 1 - r.pick(near)));
+      if (tall) extra(i, r.pick(8) === 0 ? 10 + r.pick(20) : r.pick(3));
+    }
+  });
+}
 // Names that sort differently by UTF-8 bytes (the order the layout uses) than by UTF-16
 // units: ﬁ and Ｗ are in the BMP above the surrogates, 𝔸 and 𠀀 are beyond it
 const names = ['𠀀han', 'Ｗide', 'Zeta', '𝔸stral', 'ﬁsh', 'éclair'].map(name => `${name}\n  Id\n  HubId -> Hub`).join('\n') + '\nHub\n  Id';
@@ -120,8 +143,14 @@ module.exports = examples => [
   { name: 'random300x3', text: scattered(300, 3, 7), limit: 100, crosses: true },
   { name: 'random150x12', text: scattered(150, 12, 7), limit: 500, crosses: true },
   { name: 'random1500x3', text: scattered(1500, 3, 7), limit: 1000, crosses: true },
+  { name: 'chain1500', text: chain(1500), limit: 1000, rows: true },
+  { name: 'backlinked1500', text: backlinked(1500, 7), limit: 1000, crosses: true, rows: true },
+  { name: 'chain100tall70', text: tall(100, 70), limit: 100, rows: true },
+  { name: 'chain30hub40', text: hubbed(30, 40), limit: 20 },
+  { name: 'chain100hub300', text: hubbed(100, 300), limit: 100 },
 ];
 module.exports.scrambled = scrambled;
+module.exports.long = long;
 // A diagram arranged by hand, whose arrows have to be searched for: the spots Auto layout
 // gave ([name, x, y] from the top-left, in name order) three times as far apart, and every
 // table then moved by a random -150…150 (in tens) in x, then in y

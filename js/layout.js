@@ -153,15 +153,19 @@ function bestSpot(t, placed, dims, edges, anchor = null) {
 // in each column by sweeping until few lines cross, heights by lining rows up with the rows
 // they point to. FK direction is a start, not a rule: a hub's leaf tables wrap into strips
 // on both sides of it, and a table whose neighbours share a column may change sides.
-// There are no candidate layouts and no routing in here. Every step is integer arithmetic
-// and every tie falls back to name order, so the same boxes and links give the same diagram
-// on any screen, and in Squill, which runs the same steps (test/fixtures/layout_golden.txt).
+// A group far too wide for that (a long chain) folds into rows, each laid out this way; that
+// is done up to three times, for its shape. Otherwise there are no candidate layouts, and no
+// routing in here. Every step is integer arithmetic and every tie falls back to name order,
+// so the same boxes and links give the same diagram on any screen, and in Squill, which runs
+// the same steps (test/fixtures/layout_golden.txt).
 const AUTO = {
   COL_GAP: 90, ROW_GAP: 50, GROUP_GAP: 120, GRID: 10,
   LANE_H: 18, LANE_GAP: 10, LANE_SEP: 2,          // a lane (a line passing a column), its gap to a table and to another lane
   LAYER: 2048,                                    // a layer's key is layer · LAYER + strip
   CAP_MIN: 900,                                   // no hub wraps below a screenful
   GAP_MAX: 800,                                   // the hole that lining two rows up may hold open
+  FOLD: 3, FOLD_MIN: 4, FOLD_ROUNDS: 3,           // layers fold when they are this many times too wide, into no fewer columns than this
+  STREET_LANE: 10,                                  // the room a line gets in the street between two rows of folded layers
   ORDER_WORK: 6000, STARTS_MAX: 16, SWEEPS: 12, BIG: 3000,
   MOVE_BUDGET: 2e6,
   NEW_BATCH: 8,                                   // more new tables than this at once are laid out as a block
@@ -274,13 +278,15 @@ function layoutGroup(boxes, links, aspectQ) {
   let area = 0;
   for (const b of boxes) area += (b.w + AUTO.COL_GAP) * (b.h + AUTO.ROW_GAP);
   const cap = Math.max(AUTO.CAP_MIN, isqrt(Math.floor(area * 100 / aspectQ)));
-  const key = tableLayers(n, links).map(l => l * AUTO.LAYER);
+  const layer = tableLayers(n, links), folded = foldLayers(boxes, links, near, layer, Math.floor(cap * aspectQ / 100), aspectQ, cap);
+  if (folded) return folded;
+  const key = layer.map(l => l * AUTO.LAYER);
   wrapHubs(boxes, links, near, key, cap);
   evenSides(boxes, near, key, cap);
-  let best = placeLayers(boxes, links, key);
+  let best = placeLayers(boxes, links, key, false);
   // L7: once more with the tables that changed sides, kept only if it is better
   if (moveOneSided(boxes, links, near, key, best, cap)) {
-    const again = placeLayers(boxes, links, key);
+    const again = placeLayers(boxes, links, key, false);
     if (again.crossings < best.crossings || (again.crossings === best.crossings && again.cost < best.cost)) best = again;
   }
   return best;
@@ -335,17 +341,118 @@ function tableLayers(n, links) {
   return layer;
 }
 
+// L1b. Layers far wider than the width has room for (a long chain) fold into as many columns
+// as fit it. Then once or twice more, with the columns that give the wanted shape now that
+// the size of the streets and channels is known; the nearest to that shape is kept.
+// Not a group with a fan for L2 to wrap (a hub's tables wrap, they don't fold), nor one the
+// shape wants in a single row; and the more of its links pass a layer, which a street
+// serves worse than lanes do, the wider its layers must be: FOLD times as wide if all do.
+// Returns null if the layers stay as they are.
+function foldLayers(boxes, links, near, layer, width, aspectQ, cap) {
+  let layers = 0, wide = 0, passing = 0, best = null, least = 0;
+  for (const l of layer) layers = Math.max(layers, l + 1);
+  if (tallFans(boxes, near, layer, cap).length) return null;
+  const widest = new Array(layers).fill(0);
+  boxes.forEach((b, v) => widest[layer[v]] = Math.max(widest[layer[v]], b.w));
+  for (const w of widest) if (w) wide += w + AUTO.COL_GAP;
+  for (const l of links) if (Math.abs(layer[l.from] - layer[l.to]) > 1) passing++;
+  let columns = Math.max(AUTO.FOLD_MIN, Math.floor((width + AUTO.COL_GAP) * layers / wide));
+  if (layers * links.length <= AUTO.FOLD * columns * (links.length + (AUTO.FOLD - 1) * passing)) return null;
+  for (let round = 0; round < AUTO.FOLD_ROUNDS; round++) {
+    const placed = placeFolded(boxes, links, layer, columns), a = 100 * placed.w, b = aspectQ * placed.h;
+    const off = Math.floor(1000 * Math.max(a, b) / Math.min(a, b)); // how far from the shape, in thousandths
+    if (!best || off < least) { best = placed; least = off; }
+    const next = Math.max(AUTO.FOLD_MIN, Math.floor(columns * isqrt(Math.floor(10000 * b / a)) / 100));
+    if (next >= layers) return null;
+    if (next === columns) break;
+    columns = next;
+  }
+  return best;
+}
+
+// The folded layers run to the last column and back again, each run a row over the one
+// before: a chain is a snake, read from the bottom. A row is laid out as a group of its own
+// (L3–L5), its tables level. A line that passes a column on its way runs in the street
+// between two rows, which is as high as the most lines that pass one column there.
+function placeFolded(boxes, links, layer, columns) {
+  const n = boxes.length, period = 2 * columns - 2;
+  const row = layer.map(l => l < columns ? 0 : 1 + Math.floor((l - columns) / (columns - 1)));
+  const col = layer.map(l => columns - 1 - (l % period < columns ? l % period : period - l % period));
+  let rows = 0;
+  for (const r of row) rows = Math.max(rows, r + 1);
+  const members = Array.from({ length: rows }, () => []), own = Array.from({ length: rows }, () => []), local = new Int32Array(n);
+  for (let v = 0; v < n; v++) { local[v] = members[row[v]].length; members[row[v]].push(v); }
+  // A line's street: the one nearest the middle between its two rows; for two tables of one
+  // row the one over or under it, whichever is nearer the line's two ends. street r is over row r.
+  const through = Array.from({ length: rows }, () => new Int32Array(columns)), street = new Int32Array(links.length);
+  links.forEach((l, i) => {
+    const a = row[l.from], b = row[l.to], reach = Math.abs(col[l.from] - col[l.to]);
+    if (a === b && reach === 1) own[a].push({ from: local[l.from], to: local[l.to], fy: l.fy, ty: l.ty });
+    if (reach < 2) return;
+    street[i] = a !== b ? (a + b - 1) >> 1 : l.fy + l.ty <= boxes[l.from].h - l.fy + boxes[l.to].h - l.ty ? a : a - 1;
+    if (street[i] >= 0) for (let c = Math.min(col[l.from], col[l.to]) + 1; c < Math.max(col[l.from], col[l.to]); c++) through[street[i]][c]++;
+  });
+  const top = new Array(rows).fill(0), high = new Array(rows).fill(0), y = new Array(n).fill(0);
+  let h = 0;
+  for (let r = rows - 1; r >= 0; r--) {
+    if (r < rows - 1) h = gridUp(h + ROUTE.STREET + AUTO.STREET_LANE * through[r].reduce((m, k) => Math.max(m, k), 0));
+    top[r] = h;
+    if (!members[r].length) continue;
+    const placed = placeLayers(members[r].map(v => boxes[v]), own[r], members[r].map(v => (columns - 1 - col[v]) * AUTO.LAYER), true);
+    members[r].forEach((v, i) => y[v] = h + placed.y[i]);
+    high[r] = placed.h;
+    h += placed.h;
+  }
+  // the vertical runs each channel will hold: between a line's two rows, or from each to its street
+  const lines = new Map(), runs = Array.from({ length: columns + 1 }, () => []); // runs[c]: left of column c
+  const middle = s => s < 0 ? top[0] + high[0] + AUTO.ROW_GAP : s >= rows - 1 ? -AUTO.ROW_GAP : (top[s + 1] + high[s + 1] + top[s]) >> 1;
+  links.forEach((l, i) => {
+    const a = col[l.from], b = col[l.to], ya = y[l.from] + l.fy, yb = y[l.to] + l.ty, name = l.to + ':' + l.ty;
+    if (!lines.has(name)) lines.set(name, lines.size);
+    const line = lines.get(name);
+    if (a === b) { runs[a].push([line, ya, yb]); runs[a + 1].push([line, ya, yb]); } // a loop, on either side
+    else if (Math.abs(a - b) === 1) runs[Math.max(a, b)].push([line, ya, yb]);
+    else {
+      runs[a < b ? a + 1 : a].push([line, ya, middle(street[i])]);
+      runs[a < b ? b : b + 1].push([line, middle(street[i]), yb]);
+    }
+  });
+  const wide = new Array(columns).fill(0), left = new Array(columns).fill(0);
+  for (let v = 0; v < n; v++) wide[col[v]] = Math.max(wide[col[v]], boxes[v].w);
+  // a channel gets a quarter more tracks than its runs overlap, and two: packed from the top down (the router's R6), they leave some free
+  for (let c = 1; c < columns; c++) {
+    const depth = trunkDepth(runs[c], ROUTE.TRACK >> 1);
+    left[c] = left[c - 1] + gridUp(wide[c - 1] + Math.max(AUTO.COL_GAP, 2 * ROUTE.STUB + ROUTE.TRACK * (depth + (depth >> 2) + 2)));
+  }
+  return { x: boxes.map((_, v) => left[col[v]]), y, w: left[columns - 1] + wide[columns - 1], h };
+}
+
 // L2. A layer taller than cap: a hub's leaf tables (one neighbour) there, when they are more
 // than a column by themselves, go into strips next to the hub, on both sides of it. Their
 // lines are one bus, so the strips cross nothing. Wrapping smaller groups tangles trees.
 function wrapHubs(boxes, links, near, key, cap) {
-  const n = boxes.length, tall = v => boxes[v].h + AUTO.ROW_GAP;
-  const load = new Map(), rowAtHub = new Int32Array(n);
-  for (let v = 0; v < n; v++) load.set(key[v], (load.get(key[v]) ?? 0) + tall(v));
+  const tall = v => boxes[v].h + AUTO.ROW_GAP, rowAtHub = new Int32Array(boxes.length);
   for (const l of links) {
     if (near[l.from].size === 1) rowAtHub[l.from] = l.ty;
     if (near[l.to].size === 1) rowAtHub[l.to] = l.fy;
   }
+  for (const { hub, layer, list, total } of tallFans(boxes, near, key, cap)) {
+    const strips = Math.ceil(total / cap), side = Math.sign(layer - key[hub]);
+    list.sort((a, b) => rowAtHub[a] - rowAtHub[b] || a - b);
+    let before = 0;
+    for (const v of list) {
+      const s = Math.min(strips - 1, Math.floor((2 * before + tall(v)) * strips / (2 * total)));
+      key[v] = key[hub] + (s % 2 ? -side : side) * ((s >> 1) + 1);
+      before += tall(v);
+    }
+  }
+}
+
+// The fans L2 wraps: { hub, layer, list, total }, a hub's leaf tables in one layer and their
+// height, by layer and then by the first of them
+function tallFans(boxes, near, key, cap) {
+  const n = boxes.length, tall = v => boxes[v].h + AUTO.ROW_GAP, load = new Map(), fans = [];
+  for (let v = 0; v < n; v++) load.set(key[v], (load.get(key[v]) ?? 0) + tall(v));
   for (const [layer, sum] of [...load].sort((a, b) => a[0] - b[0])) {
     if (sum <= cap) continue;
     const leaves = new Map(); // hub → its leaf tables in this layer
@@ -358,17 +465,10 @@ function wrapHubs(boxes, links, near, key, cap) {
     }
     for (const [hub, list] of leaves) {
       const total = list.reduce((s, v) => s + tall(v), 0);
-      if (total <= cap) continue;
-      const strips = Math.ceil(total / cap), side = Math.sign(layer - key[hub]);
-      list.sort((a, b) => rowAtHub[a] - rowAtHub[b] || a - b);
-      let before = 0;
-      for (const v of list) {
-        const s = Math.min(strips - 1, Math.floor((2 * before + tall(v)) * strips / (2 * total)));
-        key[v] = key[hub] + (s % 2 ? -side : side) * ((s >> 1) + 1);
-        before += tall(v);
-      }
+      if (total > cap) fans.push({ hub, layer, list, total });
     }
   }
+  return fans;
 }
 
 // L2b. A layer that is still taller than cap: a table there whose neighbours all stand in one
@@ -395,32 +495,34 @@ function evenSides(boxes, near, key, cap) {
 }
 
 // L3–L5 and L8 for one choice of layers: columns, lanes, order, heights, x
-function placeLayers(boxes, links, key) {
+function placeLayers(boxes, links, key, level) {
   const g = laneGraph(boxes, links, key), n = g.tables, C = g.keys.length;
   orderColumns(g);
   mergeLanes(g);
-  const { tops, cost } = rowHeights(g);
+  const { tops, cost } = rowHeights(g, level);
   // L8: a column is as wide as its widest table; a channel widens with the vertical runs it will hold
   const wide = new Array(C).fill(0), left = new Array(C).fill(0);
   for (let v = 0; v < n; v++) wide[g.col[v]] = Math.max(wide[g.col[v]], boxes[v].w);
   for (let c = 1; c < C; c++) {
-    left[c] = left[c - 1] + gridUp(wide[c - 1] + Math.max(AUTO.COL_GAP, 2 * ROUTE.STUB + ROUTE.TRACK * (trunkDepth(g.channels[c - 1], tops) + 1)));
+    const runs = g.channels[c - 1].map(s => [s.line, tops[s.l] + s.lo, tops[s.r] + s.ro]);
+    left[c] = left[c - 1] + gridUp(wide[c - 1] + Math.max(AUTO.COL_GAP, 2 * ROUTE.STUB + ROUTE.TRACK * (trunkDepth(runs, 0) + 1)));
   }
   let h = 0;
   for (let v = 0; v < n; v++) h = Math.max(h, tops[v] + boxes[v].h);
   return { g, tops, x: boxes.map((_, v) => left[g.col[v]]), y: boxes.map((_, v) => tops[v]), w: left[C - 1] + wide[C - 1], h, crossings: g.crossings, cost };
 }
 
-// The most row lines whose vertical runs overlap in one channel
-function trunkDepth(channel, tops) {
+// The most row lines whose vertical runs overlap in one channel, or come within twice
+// `near` of each other. runs: [row line, from, to]
+function trunkDepth(runs, near) {
   const spans = new Map();
-  for (const s of channel) {
-    const a = tops[s.l] + s.lo, b = tops[s.r] + s.ro, span = spans.get(s.line);
+  for (const [line, a, b] of runs) {
+    const span = spans.get(line);
     if (a === b) continue;
     if (span) { span[0] = Math.min(span[0], a, b); span[1] = Math.max(span[1], a, b); }
-    else spans.set(s.line, [Math.min(a, b), Math.max(a, b)]);
+    else spans.set(line, [Math.min(a, b), Math.max(a, b)]);
   }
-  const ends = [...spans.values()].flatMap(([lo, hi]) => [[lo, 1], [hi, -1]]).sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  const ends = [...spans.values()].flatMap(([lo, hi]) => [[lo - near, 1], [hi + near, -1]]).sort((p, q) => p[0] - q[0] || p[1] - q[1]);
   let depth = 0, most = 0;
   for (const [, d] of ends) most = Math.max(most, depth += d);
   return most;
@@ -689,10 +791,10 @@ function mergeLanes(g) {
 // one of its middle neighbours in the column before (its row level with the row it is joined
 // to), the chains that makes are packed upward, and the best of four runs is kept: columns
 // left to right or right to left, packed from the top or from the bottom.
-function rowHeights(g) {
+function rowHeights(g, level) {
   let best = null;
   for (const forward of [true, false]) for (const flip of [false, true]) {
-    const tops = alignRows(g, forward, flip);
+    const tops = alignRows(g, forward, flip, level);
     // twice the lines' height differences, plus the height of it all
     let cost = 0, lo = Infinity, hi = -Infinity;
     for (const channel of g.channels) for (const s of channel) cost += 2 * Math.abs(tops[s.l] + s.lo - tops[s.r] - s.ro);
@@ -703,13 +805,13 @@ function rowHeights(g) {
   return best;
 }
 
-function alignRows(g, forward, flip) {
+function alignRows(g, forward, flip, level) {
   const total = g.col.length, n = g.tables, h = g.h;
   const cols = (forward ? g.cols : [...g.cols].reverse()).map(col => flip ? [...col].reverse() : col);
   const before = forward ? g.left : g.right, after = forward ? g.right : g.left;
   const index = new Int32Array(total);
   for (const col of cols) col.forEach((v, i) => index[v] = i);
-  const at = (v, off) => flip ? gridUp(h[v]) - off : off;
+  const at = (v, off) => flip ? gridUp(h[v]) - (level ? 0 : off) : level ? 0 : off; // level: the tops line up, not the rows
   const gap = (p, q) => p >= n && q >= n ? AUTO.LANE_SEP : p >= n || q >= n ? AUTO.LANE_GAP : AUTO.ROW_GAP;
   const pitch = (p, q) => gridUp(h[p] + gap(p, q)); // from p's top to the top of q right below it
 
