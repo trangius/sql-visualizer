@@ -576,12 +576,14 @@ function routeGroup(arrows, members) {
       best = (l.x - r.x || busy(0) - busy(1) || (e.a.x + e.b.x - 2 * col.xl) - (2 * col.xr - e.a.x - e.a.w - e.b.x - e.b.w)) <= 0 ? l : r;
     } else {
       // Out of the side that faces the other table and into the side that faces this one.
-      // Round the other table, into its far side, only if that crosses less; out of this
-      // table's far side (a line that starts the other way is hard to follow) only if it
-      // saves two crossings; and neither if it is much longer.
+      // Round the other table, into its far side, or out of this table's far side, only if
+      // that crosses less: out of the far side for one crossing, but for two where the tables
+      // stand in rows (there it would leave the street), and for two when it does both (a
+      // line that starts and ends the other way is hard to follow); and none of them if it
+      // is much longer.
       const toward = cb > ca ? 1 : 0, facing = plan(e, line, toward, 1 - toward);
       best = facing;
-      if (budget > 0) for (const [sa, sb, saves] of [[toward, toward, 1], [1 - toward, 1 - toward, 2], [1 - toward, toward, 2]]) {
+      if (budget > 0) for (const [sa, sb, saves] of [[toward, toward, 1], [1 - toward, 1 - toward, inRows ? 2 : 1], [1 - toward, toward, 2]]) {
         if (facing.x < saves) break;
         const round = plan(e, line, sa, sb);
         if (round.x < best.x && round.x <= facing.x - saves && round.len <= facing.len + ROUTE.SIDE_DETOUR) best = round;
