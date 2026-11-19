@@ -35,8 +35,8 @@ function refHue(key, refCol) {
   if (!refCol) return t.pkCols.length === 1 ? t.hue : null;
   const col = t.cols.find(c => lc(c.name) === lc(refCol));
   if (!col) return null;
-  const key = partKeyHue(t, col);
-  if (key != null) return key;
+  const hue = partKeyHue(t, col);
+  if (hue != null) return hue;
   for (const o of dlg.tables) for (const c of o.cols) if (c.targetCol === col) return c.keyHue;
   return null;
 }
