@@ -49,7 +49,11 @@ function markShown(tables) {
   keyHues(tables);
 }
 
-// Every key gets a colour of its own, and an FK the colour of the key it points to.
+// The colour of the key col is part of in t: its primary key, else a unique (…) over several columns
+const partKeyHue = (t, col) => t.pkCols.includes(col) ? t.hue : t.multiUniques?.find(u => u.cols.includes(col))?.hue ?? null;
+
+// Every key gets a colour of its own, and an FK the colour of the key it points to,
+// also when that key is over several columns.
 // Hues step by the golden angle, so any number of them stay far apart on the wheel,
 // skipping yellow, which at a readable lightness is a muddy olive;
 // lightness and chroma come from the theme (--key-l, --key-c) and are even in OKLCH.
@@ -62,7 +66,7 @@ function keyHues(tables) {
     do h = Math.round((40 + i++ * 137.508) % 360); while (h > 70 && h < 115);
     return h;
   };
-  const colHue = new Map(); // a column an FK points to that isn't its table's primary key
+  const colHue = new Map(); // a column an FK points to that isn't in a key of its table
   for (const t of tables) {
     t.hue = t.pkCols.length ? next() : null;
     for (const u of t.multiUniques ?? []) u.hue = next();
@@ -70,9 +74,9 @@ function keyHues(tables) {
   for (const t of tables) {
     for (const c of t.cols) {
       if (c.target) {
-        const tc = c.targetCol, pk = pointsToPk(c);
-        if (!pk && !colHue.has(tc)) colHue.set(tc, next());
-        c.keyHue = pk ? c.target.hue : colHue.get(tc);
+        const tc = c.targetCol, key = partKeyHue(c.target, tc);
+        if (key == null && !colHue.has(tc)) colHue.set(tc, next());
+        c.keyHue = key ?? colHue.get(tc);
       } else c.keyHue = c.isPk ? t.hue : null;
     }
   }
