@@ -229,7 +229,7 @@ let docs = store.get('docs', null);
 if (!docs?.list?.length) {
   // first visit, or data saved by the single-diagram version: that becomes the first tab
   const old = store.get('state', null);
-  const text = old?.text ?? EXAMPLES.school;
+  const text = old?.text ?? '';
   const id = newDocId();
   store.set(docKey(id), { ...DOC_DEFAULTS, ...(old && Object.fromEntries(Object.keys(DOC_DEFAULTS).filter(k => k in old).map(k => [k, old[k]]))), text, base: old ? null : text, pos: store.get('pos', {}) });
   if (old) store.set('settings', Object.fromEntries(SETTINGS.filter(k => k in old).map(k => [k, old[k]])));
