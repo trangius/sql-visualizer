@@ -203,6 +203,7 @@ ta.addEventListener('input', () => {
   histTyping();
   if (state.mode === 'text') { state.text = ta.value; state.sqlStale = true; }
   else { state.sql = ta.value; state.textStale = true; }
+  if (!started) { saveState(); return; } // typed while the fonts load: drawn at the start
   update();
   if (pastedAll) { pastedAll = false; posBeforeData = null; autoLayout(); fit(); }
   saveState();
@@ -396,10 +397,15 @@ function setMode(mode) {
   saveState();
 }
 
-function loadEditor() {
-  ta.value = state.mode === 'text' ? state.text : state.sql;
-  ta.scrollTop = 0;
+// The text goes into the editor as soon as the scripts have run; only drawing waits for the
+// fonts. An editor left empty until then would save a keystroke as the whole diagram.
+function fillEditor() {
+  const text = state.mode === 'text' ? state.text : state.sql;
+  if (ta.value !== text) { ta.value = text; ta.scrollTop = 0; }
   updateModeSeg();
+}
+function loadEditor() {
+  fillEditor();
   update();
 }
 
@@ -845,6 +851,7 @@ const scriptsRun = new Promise(r => document.readyState === 'loading' ? document
 // A font that fails to download (blocked remote fonts) counts as loaded: the fallback is measured.
 const fontsLoaded = Promise.all(Object.values(FONTS).map(f => document.fonts.load(f))).catch(() => {});
 let started = false;
+scriptsRun.then(fillEditor);
 Promise.all([scriptsRun, Promise.race([fontsLoaded, new Promise(r => setTimeout(r, 1500))])]).then(() => {
   widthCache.clear();
   loadEditor();
