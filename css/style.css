@@ -205,6 +205,7 @@ body.panel-collapsed #left, body.panel-collapsed #split { display: none; }
 .logo { width: 32px; height: 32px; flex: none; display: block; }
 /* narrow screens: drop the toolbar labels (the buttons keep their tooltips) */
 @media (max-width: 760px) { .appbar .tool .lbl { display: none; } .appbar .tool { padding: 0 8px; } }
+@media (max-width: 440px) { .appbar { gap: 4px; padding: 0 8px 0 10px; } .appbar .tool { padding: 0 6px; } } /* a phone: every button fits */
 
 .menu-wrap { position: relative; }
 .menu {
@@ -291,6 +292,12 @@ main { flex: 1; display: flex; min-height: 0; }
 #split i { width: 1px; height: 100%; background: var(--line); }
 #split.active i { background: var(--accent); }
 #right { flex: 1; min-width: 0; position: relative; overflow: hidden; container: canvas / inline-size; }
+/* too narrow for the editor (300px) beside the canvas (380px), a phone: the editor above it */
+@media (max-width: 679px) {
+  main { flex-direction: column; }
+  #left { width: auto !important; height: 45%; border-bottom: 1px solid var(--line); }
+  #split { display: none; }
+}
 
 /* ─── Editor ──────────────────────────────────────────────────────────────── */
 .editor-head {
@@ -329,7 +336,7 @@ main { flex: 1; display: flex; min-height: 0; }
 #docName::placeholder { color: var(--faint); }
 
 /* a transparent textarea over a highlighted <pre> */
-.editor { flex: 1; display: flex; min-height: 0; position: relative; }
+.editor { flex: 1; display: flex; min-height: 0; position: relative; overflow: hidden; } /* a short one: the gutter's padding would show under the status bar */
 .gutter {
   width: 46px; flex: none; overflow: hidden; padding: 14px 0 214px; text-align: right;
   font: calc(var(--code-size) - 1px)/var(--code-lh) var(--mono); color: var(--faint); user-select: none; background: var(--panel);

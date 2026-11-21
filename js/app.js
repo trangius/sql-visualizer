@@ -839,12 +839,15 @@ split.addEventListener('pointerdown', e => {
 
 // Presentation mode: hide everything but the diagram, go full screen and zoom it up.
 // Leaving (the button, or Esc, which also ends full screen) puts the view back.
+// A phone starts in it, to look at the diagram; its button there says Edit.
 let presentView = null;
+// a touch screen whose short side is a phone's (a tablet's is wider)
+const phone = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
 function setPresenting(on) {
   if (on === !!presentView) return;
   document.body.classList.toggle('presenting', on);
   $('#presentBtn').classList.toggle('on', on);
-  $('#presentBtn span').textContent = on ? 'Exit' : 'Present';
+  $('#presentBtn span').textContent = on ? (phone ? 'Edit' : 'Exit') : 'Present';
   if (on) {
     presentView = { ...view };
     document.documentElement.requestFullscreen?.().catch(() => {});
@@ -889,8 +892,10 @@ Promise.all([scriptsRun, Promise.race([fontsLoaded, new Promise(r => setTimeout(
   started = true;
   ta.readOnly = outdated;
   $('#loading').hidden = true;
-  // a touch screen whose short side is a phone's (a tablet's is wider): say once that it's made for a computer
-  if (matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600 && !store.get('phoneOk', false)) $('#phoneNotice').hidden = false;
+  if (phone) {
+    setPresenting(true);
+    $('#phoneNotice').hidden = store.get('phoneOk', false); // said once: it's made for a computer
+  }
 });
 $('#phoneOk').onclick = () => { $('#phoneNotice').hidden = true; store.set('phoneOk', true); };
 // fonts that arrive late: measure again, and tidy up if the wider boxes now collide.

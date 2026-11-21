@@ -1625,23 +1625,41 @@ function showSelectHint() {
 $('#selectHintOk').onclick = () => { store.set('selectHintSeen', true); $('#selectHint').hidden = true; };
 
 let drag = null, frame = 0;
+// Fingers on the canvas, by pointer id. Two of them pinch: they zoom, and pan by their middle.
+const fingers = new Map();
+const pinchAt = () => {
+  const [a, b] = [...fingers.values()], r = svg.getBoundingClientRect();
+  return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top };
+};
 svg.addEventListener('pointerdown', e => {
   if (e.button !== 0) return;
   closeMenus();
   const g = e.target.closest('.tbl'), multi = e.shiftKey || e.metaKey || e.ctrlKey;
   svg.setPointerCapture(e.pointerId);
-  if (g && multi) {
+  if (e.pointerType === 'touch') {
+    fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (fingers.size > 2) return;
+    if (fingers.size === 2) {
+      if (drag?.kind === 'box' && drag.moved) { saveDoc(); histCommit(); svg.classList.remove('dragging'); drawDiagram(); }
+      const p = pinchAt();
+      drag = { kind: 'pinch', p, s: view.s, w: { x: (p.x - view.tx) / view.s, y: (p.y - view.ty) / view.s } };
+      return;
+    }
+  }
+  // while presenting, a finger only looks: on a table too it pans, and doesn't move or pick it
+  const look = e.pointerType === 'touch' && presentView;
+  if (g && multi && !look) {
     const n = g.dataset.t, s = new Set(selected);
     s.has(n) ? s.delete(n) : s.add(n);
     setSelected(s);
     drag = { kind: 'none' };
-  } else if (g) {
+  } else if (g && !look) {
     const w = toWorld(e), name = g.dataset.t;
     if (!selected.has(name)) setSelected([]);
     const names = selected.has(name) ? [...selected].filter(n => pos[n]) : [name];
     drag = { kind: 'box', name, w, start: Object.fromEntries(names.map(n => [n, { ...pos[n] }])),
              sx: e.clientX, sy: e.clientY, moved: false, line: e.target.closest('[data-line]')?.dataset.line ?? null };
-  } else if (multi) {
+  } else if (multi && !look) {
     const m = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     m.setAttribute('class', 'marquee');
     svg.appendChild(m);
@@ -1652,7 +1670,17 @@ svg.addEventListener('pointerdown', e => {
   }
 });
 svg.addEventListener('pointermove', e => {
+  if (fingers.has(e.pointerId)) fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (!drag) return;
+  if (drag.kind === 'pinch') {
+    if (fingers.size !== 2) return;
+    const p = pinchAt();
+    view.s = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, drag.s * p.d / drag.p.d));
+    view.tx = p.x - drag.w.x * view.s;
+    view.ty = p.y - drag.w.y * view.s;
+    applyView();
+    return;
+  }
   if (drag.kind === 'pan') {
     if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= 4) drag.moved = true;
     view.tx = drag.tx + e.clientX - drag.sx;
@@ -1678,7 +1706,9 @@ svg.addEventListener('pointermove', e => {
   for (const [n, p] of Object.entries(drag.start)) pos[n] = { x: p.x + dx, y: p.y + dy };
   if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawDiagram(); });
 });
-function endDrag() {
+function endDrag(e) {
+  fingers.delete(e.pointerId);
+  if (drag?.kind === 'pinch') { if (fingers.size < 2) drag = null; return; } // the finger left behind doesn't pan
   if (!drag) return;
   const dropped = drag.kind === 'box' && drag.moved;
   if (drag.kind === 'box') {
