@@ -228,23 +228,67 @@ const newDocId = () => Date.now().toString(36) + Math.random().toString(36).slic
 // a new diagram is named after its first comment line ("# School database")
 const docNameFrom = text => (text.match(/^#\s*(.+)$/m)?.[1].trim().slice(0, 40)) || 'Untitled';
 
+// ─── Formats ───
+// What is stored has a format number, kept under 'format'. A change to its shape raises
+// FORMAT and adds the step that brings the format before it up to the new one: STORAGE_STEPS
+// for the keys, DOC_STEPS for one diagram's data, which also arrives saved online by an older
+// version. Each format has test/fixtures/format-<n>.json, what it looked like; the site's
+// tests load every one into the current app. A window that finds a newer format than its own
+// stops writing: see becomeOutdated.
+//   1  one diagram, under 'state' and 'pos'
+//   2  tabs: 'docs', and 'doc.<id>' for each diagram
+const FORMAT = 2;
+const STORAGE_STEPS = {
+  2() {
+    const old = store.get('state', null);
+    if (!old) return;
+    const id = newDocId(), text = old.text ?? '';
+    const pick = keys => Object.fromEntries(keys.filter(k => k in old).map(k => [k, old[k]]));
+    store.set(docKey(id), { ...DOC_DEFAULTS, ...pick(Object.keys(DOC_DEFAULTS)), text, base: null, pos: store.get('pos', {}) });
+    store.set('settings', pick(SETTINGS));
+    store.set('docs', { list: [{ id, name: docNameFrom(text) }], active: id });
+    store.remove('state');
+    store.remove('pos');
+  },
+};
+const DOC_STEPS = {}; // n(data) returns format n's data from format n-1's
+// diagrams were first stored in format 2; nothing stored at all is a first visit
+const storedFormat = store.get('format', null) ?? (store.get('docs', null) ? 2 : store.get('state', null) ? 1 : FORMAT);
+if (storedFormat <= FORMAT) {
+  for (let n = storedFormat + 1; n <= FORMAT; n++) STORAGE_STEPS[n]?.();
+  if (store.get('format', null) !== FORMAT) store.set('format', FORMAT);
+}
+function upgradeDoc(data) {
+  let d = data, n = d.format ?? 2;
+  if (n > FORMAT) { becomeOutdated(); return d; }
+  while (n < FORMAT) d = DOC_STEPS[++n]?.(d) ?? d;
+  return { ...d, format: FORMAT };
+}
+// A newer version of the app wrote what is stored (in another tab) or the server no longer
+// serves this one: nothing more is written, so the newer data is never replaced by older code.
+let outdated = false;
+function becomeOutdated(msg = 'This tab runs an older version of the app than the one that saved your diagrams. Reload it to keep working: changes made here are not kept.') {
+  $('#outdatedText').textContent = msg;
+  $('#outdatedNotice').hidden = false;
+  if (outdated) return;
+  outdated = true;
+  ta.readOnly = true;
+}
+$('#outdatedReload').onclick = () => location.reload();
+if (storedFormat > FORMAT) becomeOutdated();
+
 let docs = store.get('docs', null);
 if (!docs?.list?.length) {
-  // first visit, or data saved by the single-diagram version: that becomes the first tab
-  const old = store.get('state', null);
-  const text = old?.text ?? '';
+  // first visit: an empty diagram (base: what it was created with, to tell whether it changed)
   const id = newDocId();
-  store.set(docKey(id), { ...DOC_DEFAULTS, ...(old && Object.fromEntries(Object.keys(DOC_DEFAULTS).filter(k => k in old).map(k => [k, old[k]]))), text, base: old ? null : text, pos: store.get('pos', {}) });
-  if (old) store.set('settings', Object.fromEntries(SETTINGS.filter(k => k in old).map(k => [k, old[k]])));
-  docs = { list: [{ id, name: docNameFrom(text) }], active: id };
+  store.set(docKey(id), { ...DOC_DEFAULTS, base: '', pos: {}, format: FORMAT });
+  docs = { list: [{ id, name: docNameFrom('') }], active: id };
   store.set('docs', docs);
-  store.remove('state');
-  store.remove('pos');
 }
 if (!docs.list.some(d => d.id === docs.active)) docs.active = docs.list[0].id;
 let persistedDocs = structuredClone(docs);
 const documentTransforms = [];
-const normalizeDocData = data => documentTransforms.reduce((d, transform) => transform(d), data);
+const normalizeDocData = data => documentTransforms.reduce((d, transform) => transform(d), upgradeDoc(data));
 
 // Merge this window's changes with other windows instead of replacing their whole tab list.
 function syncDocs(remote = store.get('docs', docs)) {
@@ -273,6 +317,7 @@ function syncDocs(remote = store.get('docs', docs)) {
   persistedDocs = structuredClone(remote);
 }
 window.addEventListener('storage', e => {
+  if (e.key === 'sqlviz.format') { if (JSON.parse(e.newValue) > FORMAT) becomeOutdated(); return; }
   if (e.key === 'sqlviz.' + docKey(docs.active)) { if (started) takeDoc(); return; } // before the start, the first save does it
   if (e.key !== 'sqlviz.docs' || !e.newValue) return;
   try { syncDocs(JSON.parse(e.newValue)); renderTabs(); } catch { /* ignore malformed storage */ }
@@ -309,6 +354,7 @@ function addDocField(key, value) {
 // Saving. A failed save (storage full) is reported once instead of losing work silently.
 let storageWarned = false;
 function persist(key, value) {
+  if (outdated) return false;
   if (key === 'docs') syncDocs();
   if (store.set(key, value)) {
     if (key === 'docs') persistedDocs = structuredClone(docs);

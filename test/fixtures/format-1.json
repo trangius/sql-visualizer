@@ -1,0 +1,21 @@
+{
+  "about": "Format 1: one diagram, under 'state' (its fields and the settings) and 'pos'.",
+  "storage": {
+    "sqlviz.state": {
+      "text": "# School\nStudent\n  Id\n  Name vc(100)\n\nCourse\n  Id\n  StudentId -> Student\n",
+      "sql": "", "mode": "text", "textStale": false, "sqlStale": true,
+      "colors": "bleak", "fontSize": 14, "keysOnly": true, "notation": "arrows"
+    },
+    "sqlviz.pos": { "Student": { "x": 40, "y": 60 }, "Course": { "x": 520, "y": 60 } }
+  },
+  "expect": {
+    "tabs": ["School"],
+    "active": "School",
+    "docs": [
+      { "tab": "School", "text": "# School\nStudent\n  Id\n  Name vc(100)\n\nCourse\n  Id\n  StudentId -> Student\n",
+        "pos": { "Student": { "x": 40, "y": 60 }, "Course": { "x": 520, "y": 60 } } }
+    ],
+    "settings": { "fontSize": 14, "keysOnly": true },
+    "gone": ["sqlviz.state", "sqlviz.pos"]
+  }
+}

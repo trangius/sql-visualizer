@@ -345,6 +345,10 @@
 
     <!-- the messages at the bottom of the canvas, in one column: a toast stands above a notice -->
     <div class="canvas-msgs">
+      <div id="outdatedNotice" class="notice" role="alert" hidden>
+        <span id="outdatedText"></span>
+        <button id="outdatedReload" class="btn-outline">Reload</button>
+      </div>
       <div id="toast" hidden><span id="toastMsg"></span><button id="toastAct"></button></div>
 
       <div id="selectHint" class="notice" role="status" hidden>

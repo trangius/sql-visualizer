@@ -1,0 +1,36 @@
+{
+  "about": "Format 2: tabs. 'docs' lists them, 'doc.<id>' holds each diagram, 'settings' the preferences. Before the format number was stored there was no 'format' key.",
+  "storage": {
+    "sqlviz.docs": { "list": [{ "id": "f2school", "name": "School" }, { "id": "f2shop", "name": "Shop" }], "active": "f2shop" },
+    "sqlviz.doc.f2school": {
+      "text": "Student\n  Id\n  Name vc(100)\n", "sql": "", "mode": "text", "textStale": false, "sqlStale": true,
+      "base": null, "sampleLang": null, "dialect": "mariadb",
+      "pos": { "Student": { "x": 60, "y": 80 } }, "view": { "tx": 0, "ty": 0, "s": 1 }
+    },
+    "sqlviz.doc.f2shop": {
+      "text": "Customer\n  Id\n\nOrder\n  Id\n  CustomerId -> Customer\n", "sql": "", "mode": "text", "textStale": false, "sqlStale": true,
+      "base": null, "sampleLang": null, "dialect": "postgres",
+      "pos": { "Customer": { "x": 40, "y": 40 }, "Order": { "x": 520, "y": 200 } }, "view": { "tx": 10, "ty": 20, "s": 1 }
+    },
+    "sqlviz.settings": { "keysOnly": true, "fontSize": 14 }
+  },
+  "expect": {
+    "tabs": ["School", "Shop"],
+    "active": "Shop",
+    "docs": [
+      { "tab": "School", "text": "Student\n  Id\n  Name vc(100)\n", "pos": { "Student": { "x": 60, "y": 80 } } },
+      { "tab": "Shop", "text": "Customer\n  Id\n\nOrder\n  Id\n  CustomerId -> Customer\n", "dialect": "postgres",
+        "pos": { "Customer": { "x": 40, "y": 40 }, "Order": { "x": 520, "y": 200 } } }
+    ],
+    "settings": { "fontSize": 14, "keysOnly": true }
+  },
+  "online": {
+    "about": "A diagram as saved online by a format-2 version: what docData() gave, without the view's later fields.",
+    "data": {
+      "text": "Room\n  Id\n  Name vc(50)\n", "sql": "", "mode": "text", "textStale": false, "sqlStale": true,
+      "base": null, "sampleLang": null, "dialect": "mariadb",
+      "pos": { "Room": { "x": 100, "y": 100 } }, "view": { "tx": 0, "ty": 0, "s": 1 }
+    },
+    "expect": { "text": "Room\n  Id\n  Name vc(50)\n", "pos": { "Room": { "x": 100, "y": 100 } } }
+  }
+}
