@@ -556,23 +556,17 @@ function updateModeSeg() {
 $('#helpBtn').onclick = () => setHelp($('#help').hidden);
 $('#helpClose').onclick = () => setHelp(false);
 
-// Relationship notation. Going from arrows to an ER-style notation first shows why it
-// doesn't fit SQL tables; nothing changes until "Switch to …" is chosen.
-let pendingNotation = null;
+// Relationship notation: arrows, or one of the ER-style notations
 function applyNotation() {
   if (!NOTATIONS[state.notation]) state.notation = 'arrows';
   const b = $('#notationBtn');
   $('#notationIco').innerHTML = notationIcon(state.notation);
   b.classList.toggle('er', state.notation !== 'arrows');
-  b.title = state.notation === 'arrows' ? 'Relationship notation: Arrows (SQL)' : `Relationship notation: ${NOTATIONS[state.notation]} (an ER-style notation: see why arrows fit SQL tables better)`;
+  b.title = `Relationship notation: ${NOTATIONS[state.notation]}`;
   $('#notationList').innerHTML = Object.entries(NOTATIONS).map(([key, name]) =>
     `<button role="menuitemradio" aria-checked="${key === state.notation}" data-notation="${key}">` +
     `<span class="check">${key === state.notation ? '✓' : ''}</span>${notationIcon(key)}<span class="item-name">${name}</span></button>`).join('');
   if (model.tables?.length) drawDiagram();
-}
-function closeNote() {
-  pendingNotation = null;
-  $('#notationNote').hidden = true;
 }
 function setNotation(n) {
   state.notation = n;
@@ -583,20 +577,8 @@ $('#notationList').addEventListener('click', e => {
   const n = e.target.closest('[data-notation]')?.dataset.notation;
   if (!n) return;
   closeMenus();
-  if (state.notation === 'arrows' && n !== 'arrows') {
-    // stay on arrows until the user confirms; the same note for every ER-style notation
-    pendingNotation = n;
-    $('#noteSwitch').textContent = `Switch to ${NOTATIONS[n]}`;
-    $('#notationNote').hidden = false;
-    $('#noteStay').focus();
-  } else {
-    closeNote();
-    setNotation(n);
-  }
+  setNotation(n);
 });
-$('#noteSwitch').onclick = () => { const n = pendingNotation; closeNote(); if (n) setNotation(n); };
-$('#noteStay').onclick = closeNote;
-$('#notationNote').addEventListener('keydown', e => { if (e.key === 'Escape') closeNote(); });
 applyNotation();
 
 // Implicit arrows: XxxId columns without "->" point to table Xxx (diagram only)
