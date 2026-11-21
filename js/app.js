@@ -889,7 +889,10 @@ Promise.all([scriptsRun, Promise.race([fontsLoaded, new Promise(r => setTimeout(
   started = true;
   ta.readOnly = outdated;
   $('#loading').hidden = true;
+  // a touch screen whose short side is a phone's (a tablet's is wider): say once that it's made for a computer
+  if (matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600 && !store.get('phoneOk', false)) $('#phoneNotice').hidden = false;
 });
+$('#phoneOk').onclick = () => { $('#phoneNotice').hidden = true; store.set('phoneOk', true); };
 // fonts that arrive late: measure again, and tidy up if the wider boxes now collide.
 // (Fonts that are on time get here first: the start above then draws with them. Drawing the
 // still empty diagram here would make every saved table look new to that first draw.)

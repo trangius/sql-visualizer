@@ -28,6 +28,10 @@
 <div id="loading" class="cover" role="status">
   <div class="cover-card"><span class="loading-spin" aria-hidden="true"></span><span>Loading SQL Visualizer…</span></div>
 </div>
+<!-- shown at the start on a phone (app.js), until it is waved away once -->
+<div id="phoneNotice" class="cover" role="alert" hidden>
+  <div class="cover-card"><span>SQL Visualizer is made for a computer with a mouse and keyboard. On a phone, most of it is hard to use.</span><button id="phoneOk" class="btn-primary">Continue anyway</button></div>
+</div>
 <!-- shown by becomeOutdated (app.js): this tab must not be used any more -->
 <div id="outdatedNotice" class="cover" role="alert" hidden>
   <div class="cover-card"><span id="outdatedText"></span><button id="outdatedReload" class="btn-primary">Reload</button></div>

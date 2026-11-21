@@ -524,8 +524,8 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 }
 .canvas-msgs > * { pointer-events: auto; }
 /* A card over the whole page, when nothing on it may be used: until the app has started
-   (#loading), or when the tab is out of date (#outdatedNotice). Nothing in it waits for
-   another download, so a slow connection shows it complete. */
+   (#loading), when the tab is out of date (#outdatedNotice), or on a phone (#phoneNotice).
+   Nothing in it waits for another download, so a slow connection shows it complete. */
 .cover {
   position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
@@ -537,8 +537,8 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   color: var(--muted); font-size: 14px; line-height: 1.5;
 }
 #loading { opacity: 0; animation: loading-in .2s .3s forwards; } /* a fast start never shows it */
-#outdatedNotice .cover-card { flex-direction: column; align-items: stretch; gap: 16px; padding: 20px 22px 18px; color: var(--fg); }
-#outdatedReload { align-self: flex-end; }
+#outdatedNotice .cover-card, #phoneNotice .cover-card { flex-direction: column; align-items: stretch; gap: 16px; padding: 20px 22px 18px; color: var(--fg); }
+#outdatedReload, #phoneOk { align-self: flex-end; }
 .loading-spin {
   width: 16px; height: 16px; flex: none; border-radius: 50%;
   border: 2px solid var(--line2); border-top-color: var(--accent); animation: loading-spin .8s linear infinite;
