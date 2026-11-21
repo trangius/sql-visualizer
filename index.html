@@ -343,18 +343,21 @@
       </button>
     </div>
 
-    <div id="selectHint" class="notice" role="status" hidden>
-      <span>Drag a table by its header to move it. <b>Shift-click</b> tables to select several, or <b>shift-drag</b> the canvas to select an area, then drag any of them to move them together.</span>
-      <button id="selectHintOk" class="btn-outline">Got it</button>
-    </div>
+    <!-- the messages at the bottom of the canvas, in one column: a toast stands above a notice -->
+    <div class="canvas-msgs">
+      <div id="toast" hidden><span id="toastMsg"></span><button id="toastAct"></button></div>
 
-    <div id="storageNotice" class="notice" role="status" hidden>
-      <svg width="16" height="16" class="ico thin" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4M8 4.9v.1"/></svg>
-      <span>Diagrams are saved only in this browser, not on your disk. Clearing browser data or using another browser or computer means they are gone. Use <b>Export</b> to keep a copy.</span>
-      <button id="noticeOk" class="btn-outline">OK, understood</button>
-    </div>
+      <div id="selectHint" class="notice" role="status" hidden>
+        <span>Drag a table by its header to move it. <b>Shift-click</b> tables to select several, or <b>shift-drag</b> the canvas to select an area, then drag any of them to move them together.</span>
+        <button id="selectHintOk" class="btn-outline">Got it</button>
+      </div>
 
-    <div id="toast" hidden><span id="toastMsg"></span><button id="toastAct"></button></div>
+      <div id="storageNotice" class="notice" role="status" hidden>
+        <svg width="16" height="16" class="ico thin" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4M8 4.9v.1"/></svg>
+        <span id="storageNoticeText">Diagrams are saved only in this browser, not on your disk. Clearing browser data or using another browser or computer means they are gone. Use <b>Export</b> to keep a copy.</span>
+        <button id="noticeOk" class="btn-outline">OK, understood</button>
+      </div>
+    </div>
   </section>
 </main>
 

@@ -215,6 +215,8 @@ ta.addEventListener('input', () => {
 //   sqlviz.docs       the tabs: { list: [{ id, name }], active }
 //   sqlviz.doc.<id>   one diagram: text, SQL, mode, box positions and the view (pan/zoom)
 // `state` holds the preferences plus the active diagram's fields; `pos` its box positions.
+// Windows of the same browser share all of it: each merges the others' tabs into its own list
+// (syncDocs) and shows their changes to the diagram it has open (takeDoc).
 const SETTINGS = ['colors', 'fontSize', 'wrap', 'notation', 'implicit', 'keysOnly', 'dataView', 'panel', 'leftW'];
 // base: the text the diagram was created with (an example, or empty), to tell whether it has changed
 // sampleLang: the language of the data view's made-up rows, null = guessed from the names
@@ -270,6 +272,7 @@ function syncDocs(remote = store.get('docs', docs)) {
   persistedDocs = structuredClone(remote);
 }
 window.addEventListener('storage', e => {
+  if (e.key === 'sqlviz.' + docKey(docs.active)) { if (started) takeDoc(); return; } // before the start, the first save does it
   if (e.key !== 'sqlviz.docs' || !e.newValue) return;
   try { syncDocs(JSON.parse(e.newValue)); renderTabs(); } catch { /* ignore malformed storage */ }
 });
@@ -282,13 +285,25 @@ let docView = null; // the active diagram's saved pan/zoom, if any
 let model = { tables: [] };
 let prevNames = null; // table names at the last draw (null: just loaded)
 
+// A diagram's content: all of it but the view. Several windows can show the same diagram, so
+// docSeen is the active one's content as this window last read it from storage or wrote it
+// there: it tells this window's own changes from another window's.
+const docContent = d => JSON.stringify([d.pos ?? {}, ...Object.keys(DOC_DEFAULTS).map(k => d[k] ?? DOC_DEFAULTS[k])]);
+let docSeen = '';
+
 function readDoc(id) {
   const d = normalizeDocData(store.get(docKey(id), null) ?? {});
   for (const k of Object.keys(DOC_DEFAULTS)) state[k] = d[k] ?? DOC_DEFAULTS[k];
   pos = d.pos ?? {};
   docView = d.view ?? null;
+  docSeen = docContent(d);
 }
 readDoc(docs.active);
+// A field an extension keeps with each diagram: stored and read with it, like the app's own
+function addDocField(key, value) {
+  DOC_DEFAULTS[key] = value;
+  readDoc(docs.active);
+}
 
 // Saving. A failed save (storage full) is reported once instead of losing work silently.
 let storageWarned = false;
@@ -296,11 +311,12 @@ function persist(key, value) {
   if (key === 'docs') syncDocs();
   if (store.set(key, value)) {
     if (key === 'docs') persistedDocs = structuredClone(docs);
-    return;
+    return true;
   }
-  if (storageWarned) return;
+  if (storageWarned) return false;
   storageWarned = true;
   toast('Could not save: the browser storage is full. Close some tabs you no longer need.');
+  return false;
 }
 function docData(id = docs.active) {
   if (id !== docs.active) return normalizeDocData({ ...DOC_DEFAULTS, pos: {}, ...store.get(docKey(id), {}) });
@@ -308,7 +324,23 @@ function docData(id = docs.active) {
   for (const k of Object.keys(DOC_DEFAULTS)) d[k] = state[k];
   return normalizeDocData(d);
 }
-function saveDoc() { persist(docKey(docs.active), docData()); }
+// Another window changed the diagram this one shows: show its copy (the undo steps were for
+// the old one). A window with changes of its own keeps them, and its copy is the one written:
+// the last change wins.
+function takeDoc() {
+  const theirs = store.get(docKey(docs.active), null);
+  if (!theirs || docContent(normalizeDocData(theirs)) === docSeen || docContent(docData()) !== docSeen) return;
+  histCommit();
+  docHistory.delete(docs.active);
+  showDoc(docs.active);
+}
+function saveDoc() {
+  takeDoc(); // never write an old copy over another window's newer one
+  const d = docData();
+  // What is there already is not written again: a write that says nothing new (after taking
+  // another window's copy, say) could only land on top of a change that window is just making.
+  if (JSON.stringify(store.get(docKey(docs.active), null)) === JSON.stringify(d) || persist(docKey(docs.active), d)) docSeen = docContent(d);
+}
 let saveTimer = 0;
 function saveNow() {
   clearTimeout(saveTimer);
@@ -563,11 +595,12 @@ function renderDataLang() {
     `<span class="check">${state.sampleLang === id ? '✓' : ''}</span><span class="item-name">${esc(name)}</span></button>`;
   $('#dataLangList').innerHTML = item(null, `Guess (${langs.find(l => l.id === guess)?.name ?? guess})`) + langs.map(l => item(l.id, l.name)).join('');
 }
-// the data has arrived (see sample.js): draw it, and the language it is in. The tables were
-// spread out while their boxes were still empty, so spread them out again now they are full.
+// the data has arrived (see sample.js): draw it, and the language it is in. Tables that were
+// spread out while their boxes were still empty collide now they are full: spread them out
+// again. Positions saved with the data showing don't, and stay as they are.
 function onSampleData() {
   drawDiagram();
-  if (state.dataView) { autoLayout(); fit(); }
+  if (state.dataView && boxesOverlap()) { autoLayout(); fit(); }
   renderDataLang();
 }
 $('#dataLangList').addEventListener('click', e => {
@@ -804,20 +837,27 @@ if (!/mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.plat
 }
 
 // ─── Start ───────────────────────────────────────────────────────────────────
-// Box widths are measured with the Geist fonts, so wait for them (at most 1.5s).
+// Box widths are measured with the Geist fonts, so wait for them (at most 1.5s). And for the
+// page's other scripts: the rest of the app, and extensions (they add document transforms and
+// fields before the diagram is first drawn and saved).
 
+const scriptsRun = new Promise(r => document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', r, { once: true }) : r());
 // A font that fails to download (blocked remote fonts) counts as loaded: the fallback is measured.
 const fontsLoaded = Promise.all(Object.values(FONTS).map(f => document.fonts.load(f))).catch(() => {});
-Promise.race([fontsLoaded, new Promise(r => setTimeout(r, 1500))]).then(() => {
+let started = false;
+Promise.all([scriptsRun, Promise.race([fontsLoaded, new Promise(r => setTimeout(r, 1500))])]).then(() => {
   widthCache.clear();
   loadEditor();
   if (boxesOverlap()) autoLayout(); // saved positions from different box sizes
   if (docView) { Object.assign(view, docView); applyView(); } else fit();
+  started = true;
 });
-// fonts that arrive late: measure again, and tidy up if the wider boxes now collide
+// fonts that arrive late: measure again, and tidy up if the wider boxes now collide.
+// (Fonts that are on time get here first: the start above then draws with them. Drawing the
+// still empty diagram here would make every saved table look new to that first draw.)
 fontsLoaded.then(() => {
   widthCache.clear();
-  if (!model.tables) return;
+  if (!started) return;
   drawDiagram();
   if (boxesOverlap()) { autoLayout(); fit(); }
 });

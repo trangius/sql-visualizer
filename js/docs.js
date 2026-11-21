@@ -56,7 +56,8 @@ function switchDoc(id) {
   showDoc(id);
 }
 
-// Shared by switching and replacing a document; extensions do not reproduce this lifecycle.
+// Shared by switching to a document, replacing it and taking another window's copy of it
+// (takeDoc in app.js); extensions do not reproduce this lifecycle.
 function showDoc(id) {
   const h = docHistory.get(id);
   hist.undo = h?.undo ?? [];
