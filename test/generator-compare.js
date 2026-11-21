@@ -8,7 +8,8 @@
 // given to test/jaidb-sql.jai. sql_visualizer's script is made from the same model without what
 // jaidb has not (defaults, indexes, UNIQUE over several columns, the enum CHECK, the DROP preamble
 // and the FOREIGN_KEY_CHECKS/PRAGMA lines). The two are compared statement by statement, and the
-// differences are printed by category. Exits 1 when anything differs.
+// differences are printed by category, with the notes each gives on a type written as another (jaidb's unmade).
+// Exits 1 when anything differs.
 //
 // Run: node test/generator-compare.js [-v] [part of a schema's name]
 //   -v           every difference, not just the first of each kind
@@ -311,6 +312,9 @@ for (const [name, [src, expects, from = 'mariadb']] of SCHEMAS) {
   const skip = (f, n = 1) => { const e = skipped.get(f) ?? { count: 0, schemas: new Set() }; e.count += n; e.schemas.add(name); skipped.set(f, e); };
   const text = jaidbText(r.tables, skip);
   const problemsBy = Object.fromEntries(Object.keys(ENGINES).map(d => [d, dialectProblems(r.tables, d).filter(p => p.level === 'error')]));
+  // the notes on types written as others, the engine's name aside (jaidb's MS SQL Server is SQL Server here)
+  const typeNotes = (list, engineName) => list.filter(m => / has no .* type: /.test(m)).map(m => m.replace(engineName + ' ', '')).sort();
+  const svNotes = Object.fromEntries(Object.keys(ENGINES).map(d => [d, typeNotes(dialectProblems(r.tables, d).map(p => p.msg), run(`DIALECTS.${d}.name`))]));
   stripModel(r.tables);
   const jb = jaidb(text);
   for (const [d, E] of Object.entries(ENGINES)) {
@@ -318,7 +322,9 @@ for (const [name, [src, expects, from = 'mariadb']] of SCHEMAS) {
     const errors = jb[E].problems.filter(p => !p.warning);
     if (errors.length) { refused.push([name, d, 'jaidb', errors[0].message]); continue; }
     for (const u of jb[E].unmade) unmadeNotes.push(`${name} (${d}): ${u}`);
-    const diffs = compare(svScript(genSQL(r.tables, d)), jb[E].sql);
+    const diffs = compare(svScript(genSQL(r.tables, d)), jb[E].sql), jbNotes = typeNotes(jb[E].unmade, jb[E].name);
+    for (const m of svNotes[d].filter(m => !jbNotes.includes(m))) diffs.push({ category: 'notes', kind: 'type note only in sv', detail: m });
+    for (const m of jbNotes.filter(m => !svNotes[d].includes(m))) diffs.push({ category: 'notes', kind: 'type note only in jaidb', detail: m });
     results[d].compared++;
     (diffs.length ? results[d].differ : results[d].matched).push(name);
     for (const x of diffs) all.push({ schema: name, engine: d, ...x });
@@ -337,7 +343,7 @@ say('\nLeft out of the jaidb text (what its model has not)');
 for (const [f, e] of skipped) say(`  ${f}: ${e.count} in ${e.schemas.size} schema${e.schemas.size > 1 ? 's' : ''}`);
 if (unmadeNotes.length) { say('\njaidb unmade'); for (const n of unmadeNotes) say('  ' + n); }
 
-const CATEGORIES = ['quoting', 'schema prefix', 'constraint names', 'types', 'FK placement', 'numbering', 'ordering', 'other'];
+const CATEGORIES = ['quoting', 'schema prefix', 'constraint names', 'types', 'FK placement', 'numbering', 'ordering', 'notes', 'other'];
 say('\nDifferences by category (count, schema×engine pairs)');
 for (const cat of CATEGORIES) {
   const of = all.filter(x => x.category === cat);

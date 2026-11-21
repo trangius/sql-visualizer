@@ -599,5 +599,22 @@ const DIALECTS = {
 const dialectOf = d => DIALECTS[d] ?? DIALECTS.mariadb;
 
 function genSQL(tables, dialect = 'mariadb') { return genSchema(tables, dialectOf(dialect)); }
-// What the database refuses (or warns about) in the diagram
-function dialectProblems(tables, dialect = 'mariadb') { return dialectOf(dialect).problems(tables); }
+// What the database refuses (or warns about) in the diagram, and what the script writes otherwise
+function dialectProblems(tables, dialect = 'mariadb') {
+  const D = dialectOf(dialect);
+  return [...D.problems(tables), ...standInNotes(tables, D), ...shapelessNotes(tables)];
+}
+
+// A type the database hasn't, written as the one that stands in for it (standIn), or an unsigned number as the
+// next size up, said as jaidb's notes say it. A warning: the script is written all the same.
+function standInNotes(tables, D) {
+  if (D.type) return []; // Oracle's types are its own
+  const standsIn = t => { const { base, unsigned } = typeParts(t); return standIn(t, D) || (unsigned && D.types?.[base]?.[1]); };
+  return tables.flatMap(t => t.cols.filter(c => c.effType && standsIn(c.effType)).map(c =>
+    problem(c.line, `${D.name} has no ${c.effType} type: ${t.name}.${c.name} is ${typeSQL(c.effType, D)}`, 'warn')));
+}
+
+// Made-up rows have no map shapes (SPATIAL): such a column is NULL in them, and a table where one can't be gets none
+const shapeColumn = t => t.cols.find(c => !c.nullable && SPATIAL.includes(typeParts(c.effType ?? 'vc').base));
+const shapelessNotes = tables => tables.filter(t => t.cols.length && shapeColumn(t)).map(t => { const c = shapeColumn(t);
+  return problem(c.line, `${t.name} gets no sample rows: ${c.name} is ${c.effType} and can't be null, and made-up rows have no shapes`, 'warn'); });

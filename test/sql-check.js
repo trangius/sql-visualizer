@@ -151,6 +151,16 @@ Pet
   Id
   Size enum('Small','Large')
 `],
+  'stand-in types and shapes': [`Place
+  Id
+  Name
+  Kind enum('Shop','Cafe','Museum')
+  Spot point null
+Route
+  Id
+  Path linestring
+  PlaceId null -> Place
+`],
   'long names': [`AVeryLongTableNameThatGoesOnAndOnAndOnForever
   Id
   AnotherExtremelyLongColumnNameNumberOne int
@@ -330,6 +340,15 @@ const RUN = {
         fail(where, 'SQL and back changed it:\n' + toText(schema, dialect));
       }
       if (name === 'enum keeps its case' && !/'Small','Large'/.test(script)) fail(where, 'enum values changed case');
+      if (name === 'stand-in types and shapes') {
+        // a type the database hasn't is said, as the one that stands in for it; a shape is NULL in the sample rows,
+        // and a table where one can't be gets none
+        const warns = r.problems.map(p => p.msg), standIn = { postgres: 'is VARCHAR(6)', mssql: 'is NVARCHAR(6)', sqlite: 'is VARCHAR(6)' }[dialect];
+        if (standIn && !warns.some(m => m.includes("has no enum('Shop','Cafe','Museum') type: Place.Kind " + standIn))) fail(where, 'no note on the enum: ' + JSON.stringify(warns));
+        if (!warns.some(m => m.startsWith('Route gets no sample rows'))) fail(where, 'no note on Route: ' + JSON.stringify(warns));
+        if (/INSERT INTO \S*Route/.test(script)) fail(where, 'sample rows for Route');
+        if (!/INSERT INTO \S*Place/.test(script) || /POINT\(|'\w+ \w+'\)/.test(script.split('-- Sample data')[1].replace(/'[^']*'/g, ''))) fail(where, 'Place has no rows, or a made-up shape');
+      }
       const max = vm.runInContext(`dialectOf('${dialect}').maxName`, ctx);
       if (new RegExp(`\\b\\w{${max + 1},}\\b`).test(script.replace(/'[^']*'/g, ''))) fail(where, `a name longer than ${max} characters`);
       if (!run[dialect]) continue;

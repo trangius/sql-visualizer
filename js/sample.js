@@ -183,6 +183,7 @@ function typeInfo(c) {
     date: /^(date|datetime|timestamp)$/.test(base),
     time: base === 'time',
     options: base === 'enum' || base === 'set' ? enumOptions(t) : null,
+    shape: SPATIAL.includes(base), // a map's: made-up rows leave it NULL
   };
 }
 // Is a column's value written without quotes in SQL?
@@ -390,7 +391,7 @@ function tableRows(t, n, lang, plans) {
     const price = t.cols.find(c => !c.target && plans.get(c).field === 'price');
     for (const c of t.cols) {
       if (c.target || plans.get(c).field === 'total') continue;
-      values.set(c, solePk(t, c) && typeInfo(c).int ? String(i + 1) : optional(c) ? null : sampleValue(t, c, i, ctx));
+      values.set(c, solePk(t, c) && typeInfo(c).int ? String(i + 1) : optional(c) || typeInfo(c).shape ? null : sampleValue(t, c, i, ctx));
     }
     if (qty && price && values.get(qty) != null && values.get(price) != null) ctx.total = +values.get(qty) * +values.get(price);
     for (const c of t.cols) if (!c.target && plans.get(c).field === 'total') values.set(c, sampleValue(t, c, i, ctx));
@@ -497,7 +498,8 @@ function sampleData(tables, n = SAMPLE_ROWS) {
     for (const p of own) if (p.field === 'name') p.field = has('first') ? 'last' : has('last') ? 'first' : 'name';
   }
   for (const t of tables) {
-    const rows = tableRows(t, isJunction(t) ? 2 * n : n, lang, plans);
+    // a shape that can't be null can't be made up: no rows (shapelessNotes says so)
+    const rows = shapeColumn(t) ? [] : tableRows(t, isJunction(t) ? 2 * n : n, lang, plans);
     dedupe(t, rows);
     data.set(t, rows);
   }
@@ -569,6 +571,7 @@ async function sampleInserts(tables, dialect = 'mariadb') {
   const out = ['-- Sample data (made up)', ...D.dataStart(order, cyclic)];
   for (const t of order) {
     const rows = data.get(t);
+    if (shapeColumn(t)) out.push(`-- ${t.name}: no rows, ${shapeColumn(t).name} is a shape that can't be null`);
     if (!rows.length) continue;
     const [before, after] = D.dataTable?.(t) ?? [[], []];
     out.push(...before, `INSERT INTO ${tableSQL(D, t.name)} (${t.cols.map(c => D.q(c.name)).join(', ')}) VALUES`);
