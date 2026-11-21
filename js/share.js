@@ -42,16 +42,18 @@ $('#shareBtn').onclick = copyShareLink;
 async function openShared() {
   const m = location.hash.match(/^#d=([\w-]+)$/);
   if (!m) return;
-  history.replaceState(null, '', location.pathname + location.search); // a reload shouldn't add it again
   try {
     const raw = await squeeze(unb64url(m[1]), new DecompressionStream('deflate-raw'));
     const d = JSON.parse(new TextDecoder().decode(raw));
     if (typeof d?.s !== 'string') throw new Error('no schema in the link');
-    // A change to what a link holds raises FORMAT; older links are read here by their f.
-    if ((d.f ?? 2) > FORMAT) { becomeOutdated(); return; }
+    // A change to what a link holds raises FORMAT; older links are read here by their f. A newer
+    // one stays in the address, so that Reload opens it with the newer version.
+    if ((d.f ?? 2) > FORMAT) { becomeOutdated('This link was made by a newer version of the app. Reload this tab to open it.'); return; }
+    history.replaceState(null, '', location.pathname + location.search); // a reload shouldn't add it again
     const dialect = DIALECTS[d.dl] ? { dialect: d.dl } : {};
     newDoc(typeof d.n === 'string' && d.n || 'Shared', d.s, { ...docFields(d.s, d.m === 'sql'), ...dialect }); // no positions: auto layout, then fit
   } catch {
+    history.replaceState(null, '', location.pathname + location.search);
     toast('That link is broken or incomplete.');
   }
 }

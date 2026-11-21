@@ -290,7 +290,7 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 #split i { width: 1px; height: 100%; background: var(--line); }
 #split.active i { background: var(--accent); }
-#right { flex: 1; min-width: 0; position: relative; overflow: hidden; }
+#right { flex: 1; min-width: 0; position: relative; overflow: hidden; container: canvas / inline-size; }
 
 /* ─── Editor ──────────────────────────────────────────────────────────────── */
 .editor-head {
@@ -574,10 +574,15 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 
 /* "only saved in this browser", bottom-left of the canvas until dismissed (the zoom card is at the right) */
 .notice {
-  align-self: flex-start; max-width: min(520px, calc(100% - 276px));
+  align-self: flex-start; max-width: min(520px, calc(100% - 276px)); /* beside the zoom bar */
   display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 12px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
   font-size: 12.5px; line-height: 1.45; color: var(--muted);
+}
+/* a canvas too narrow for a notice beside the zoom bar: the messages go above it, full width */
+@container canvas (max-width: 640px) {
+  .canvas-msgs { bottom: 60px; }
+  .notice { max-width: 100%; }
 }
 .notice .ico { color: var(--warn); }
 .notice b { color: var(--fg); font-weight: 600; }
