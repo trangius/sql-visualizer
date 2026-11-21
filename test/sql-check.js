@@ -257,7 +257,8 @@ const db = sql => spawnSync(client, ['-u' + user, '--batch'], { input: sql, enco
 
 const ctx = require('./load')();
 const DIALECTS = vm.runInContext('DIALECTS', ctx), DBS = Object.keys(DIALECTS), NAME = d => DIALECTS[d].name;
-const LOSSY = new Set(['every type']); // types written another way: uuid is CHAR(36) in MariaDB
+// Types written another way, read back as others: uuid is CHAR(36) in MariaDB, every integer INTEGER in SQLite
+const LOSSY = { 'every type': DBS, 'fk of another integer type': ['sqlite'], 'fk of another sign': ['sqlite'] };
 const parse = vm.runInContext(`(src, sql, dialect) => {
   const r = sql ? parseSQL(src, dialect) : parseText(src);
   r.problems.push(...resolve(r.tables), ...dialectProblems(r.tables, dialect));
@@ -325,7 +326,7 @@ const RUN = {
       if (errors.length) { fail(where, 'unexpected problems ' + JSON.stringify(errors)); continue; }
       const schema = ctx.genSQL(r.tables, dialect), script = schema + '\n' + await ctx.sampleInserts(r.tables, dialect);
       if (regen(schema, dialect) !== schema) fail(where, 'reading the script and writing it again changed it:\n' + regen(schema, dialect));
-      if (!sql && ['mariadb', 'mysql', 'sqlite'].includes(dialect) && !LOSSY.has(name) && strip(toText(schema, dialect)) !== strip(textOf(src))) {
+      if (!sql && ['mariadb', 'mysql', 'sqlite'].includes(dialect) && !LOSSY[name]?.includes(dialect) && strip(toText(schema, dialect)) !== strip(textOf(src))) {
         fail(where, 'SQL and back changed it:\n' + toText(schema, dialect));
       }
       if (name === 'enum keeps its case' && !/'Small','Large'/.test(script)) fail(where, 'enum values changed case');

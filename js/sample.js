@@ -563,7 +563,7 @@ async function sampleInserts(tables, dialect = 'mariadb') {
     if (!(await loadSampleLang(lang))) { failed.add(lang); await loadSampleLang('en'); }
   }
   const data = sampleData(tables, 20);
-  const lit = (c, v) => v == null ? 'NULL' : typeInfo(c).bool ? D.bool(v !== '0') : isNumeric(c) ? v
+  const lit = (c, v) => v == null ? 'NULL' : typeInfo(c).bool ? D.bool(v !== '0', c) : isNumeric(c) ? v
     : /^(var)?binary|blob$/.test(typeInfo(c).base) && D.bin ? D.bin(v) : D.typed?.(c, v) ?? D.str(v);
   const { order, cyclic } = topoOrder(tables.filter(t => t.cols.length));
   const out = ['-- Sample data (made up)', ...D.dataStart(order, cyclic)];
@@ -571,7 +571,7 @@ async function sampleInserts(tables, dialect = 'mariadb') {
     const rows = data.get(t);
     if (!rows.length) continue;
     const [before, after] = D.dataTable?.(t) ?? [[], []];
-    out.push(...before, `INSERT INTO ${D.q(t.name)} (${t.cols.map(c => D.q(c.name)).join(', ')}) VALUES`);
+    out.push(...before, `INSERT INTO ${tableSQL(D, t.name)} (${t.cols.map(c => D.q(c.name)).join(', ')}) VALUES`);
     out.push(rows.map(r => `  (${t.cols.map(c => lit(c, r.values.get(c))).join(', ')})`).join(',\n') + ';', ...after);
   }
   out.push(...D.dataEnd(order, cyclic), '');

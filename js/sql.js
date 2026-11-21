@@ -323,6 +323,7 @@ function parseColumn(p, acc, warn, error) {
 
 // Types as the other databases write them, in the names Simple uses
 const READ_TYPES = {
+  sqlite: [[/^boolean$/, 'bool']],
   postgres: [[/^bytea$/, 'blob'], [/^jsonb$/, 'json'], [/^(timestamptz|timestamp with(out)? time zone)$/, 'timestamp'],
     [/^timetz$/, 'time'], [/^int2$/, 'smallint'], [/^int4$/, 'int'], [/^(int8|bigserial)$/, 'bigint'], [/^serial$/, 'int'],
     [/^smallserial$/, 'smallint'], [/^(float4|real)$/, 'float'], [/^float8$/, 'double'], [/^character varying\b/, 'varchar'],

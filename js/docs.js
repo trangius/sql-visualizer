@@ -204,8 +204,8 @@ const docFields = (src, sql) => sql
   : { mode: 'text', text: src };
 // The database a script was written for, by the words only it uses; MariaDB when nothing tells
 const DIALECT_SIGNS = {
-  mssql: /\[dbo\]|\bIDENTITY\s*\(|\bN?VARCHAR\s*\(\s*MAX\b|\bNVARCHAR\b|\bDATETIME2\b|\bUNIQUEIDENTIFIER\b|^\s*GO\s*$/im,
-  postgres: /\b(BIG)?SERIAL\b|\bBYTEA\b|\bJSONB\b|\bTIMESTAMPTZ\b|::|\bAS\s+IDENTITY\b|\bpg_catalog\b/i,
+  mssql: /\[dbo\]|\bdbo\.|\bIDENTITY\s*\(|\bN?VARCHAR\s*\(\s*MAX\b|\bNVARCHAR\b|\bDATETIME2\b|\bUNIQUEIDENTIFIER\b|^\s*GO\s*$/im,
+  postgres: /\bpublic\.|\b(BIG)?SERIAL\b|\bBYTEA\b|\bJSONB\b|\bTIMESTAMPTZ\b|::|\bAS\s+IDENTITY\b|\bpg_catalog\b/i,
   sqlite: /\bAUTOINCREMENT\b|\bPRAGMA\b|\bWITHOUT\s+ROWID\b/i,
   oracle: /\bVARCHAR2\b|\bNUMBER\s*\(|\bSYSDATE\b|\bCASCADE\s+CONSTRAINTS\b|\bCLOB\b/i,
 };

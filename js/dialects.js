@@ -5,7 +5,7 @@
 // script is written (gen), what the database refuses (problems) and how sample rows go
 // in (sampleInserts). state.dialect is one of its keys. Reading SQL is in sql.js.
 
-// Reserved words in MariaDB (and MySQL 8): names like these must be quoted
+// Reserved words in MariaDB and MySQL 8 together (as jaidb has them): names like these must be quoted
 const MARIADB_RESERVED = new Set(`ACCESSIBLE ADD ALL ALTER ANALYZE AND AS ASC ASENSITIVE BEFORE BETWEEN BIGINT BINARY
 BLOB BOTH BY CALL CASCADE CASE CHANGE CHAR CHARACTER CHECK COLLATE COLUMN CONDITION CONSTRAINT CONTINUE CONVERT CREATE CROSS CUBE CUME_DIST
 CURRENT_DATE CURRENT_ROLE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURSOR DATABASE DATABASES DAY_HOUR
@@ -25,10 +25,11 @@ SCHEMA SCHEMAS SECOND_MICROSECOND SELECT SENSITIVE SEPARATOR SET SHOW SIGNAL SLO
 SQLEXCEPTION SQLSTATE SQLWARNING SQL_BIG_RESULT SQL_CALC_FOUND_ROWS SQL_SMALL_RESULT SSL STARTING STATS_AUTO_RECALC
 STATS_PERSISTENT STATS_SAMPLE_PAGES STORED STRAIGHT_JOIN SYSTEM TABLE TERMINATED THEN TINYBLOB TINYINT TINYTEXT TO
 TRAILING TRIGGER TRUE UNDO UNION UNIQUE UNLOCK UNSIGNED UPDATE USAGE USE USING UTC_DATE UTC_TIME UTC_TIMESTAMP VALUES
-VARBINARY VARCHAR VARCHARACTER VARYING VIRTUAL WHEN WHERE WHILE WINDOW WITH WRITE XOR YEAR_MONTH ZEROFILL`.split(/\s+/));
+VARBINARY VARCHAR VARCHARACTER VARYING VIRTUAL WHEN WHERE WHILE WINDOW WITH WRITE XOR YEAR_MONTH ZEROFILL
+GET IO_AFTER_GTIDS IO_BEFORE_GTIDS MANUAL MASTER_BIND OPTIMIZER_COSTS PARALLEL QUALIFY`.split(/\s+/));
 
-// MySQL 8.4 reserves a few more
-const MYSQL_RESERVED = new Set([...MARIADB_RESERVED, 'MANUAL', 'PARALLEL', 'QUALIFY', 'TABLESAMPLE']);
+// MySQL 8.4 reserves one more
+const MYSQL_RESERVED = new Set([...MARIADB_RESERVED, 'TABLESAMPLE']);
 
 const SQLITE_KEYWORDS = new Set(`ABORT ACTION ADD AFTER ALL ALTER ALWAYS ANALYZE AND AS ASC ATTACH AUTOINCREMENT BEFORE
 BEGIN BETWEEN BY CASCADE CASE CAST CHECK COLLATE COLUMN COMMIT CONFLICT CONSTRAINT CREATE CROSS CURRENT CURRENT_DATE
@@ -71,7 +72,61 @@ PCTFREE PRIOR PUBLIC RAW RENAME RESOURCE REVOKE ROW ROWID ROWNUM ROWS SELECT SES
 SUCCESSFUL SYNONYM SYSDATE TABLE THEN TO TRIGGER UID UNION UNIQUE UPDATE USER VALIDATE VALUES VARCHAR VARCHAR2 VIEW
 WHENEVER WHERE WITH`.split(/\s+/));
 
-const quoter = (words, open, close = open) => n => words.has(n.toUpperCase()) ? open + n + close : n;
+// ─── Names ───────────────────────────────────────────────────────────────────
+// The scripts are written as Squill's database library (jaidb) writes them: a name bare where the database
+// takes it bare, else quoted. PostgreSQL folds a bare name to lower case, so there one with capitals is quoted
+// and every name stays as it is spelled. A table is named in the database's default schema where it has one
+// (public., dbo.).
+
+const quoter = (words, open, close = open, folds = false) => n =>
+  IDENT.test(n) && !words.has(n.toUpperCase()) && !(folds && /[A-Z]/.test(n)) ? n : open + n.split(close).join(close + close) + close;
+const tableSQL = (D, n) => (D.schema ? D.q(D.schema) + '.' : '') + D.q(n);
+
+// Lengths in bytes, as the databases count a name's
+const utf8Length = s => { let n = 0; for (const ch of s) { const p = ch.codePointAt(0); n += p < 0x80 ? 1 : p < 0x800 ? 2 : p < 0x10000 ? 3 : 4; } return n; };
+function clipUtf8(s, max) {
+  let out = '', n = 0;
+  for (const ch of s) { n += utf8Length(ch); if (n > max) break; out += ch; }
+  return out;
+}
+
+// A constraint's name: PK_table, UQ_table_column, FK_table_column, numbered from _2 and cut to `max` bytes
+function givenName(kind, table, column, number, max) {
+  const base = kind === 'pk' ? `PK_${table}` : `${kind === 'unique' ? 'UQ' : 'FK'}_${table}_${column}`, suffix = number ? '_' + (number + 1) : '';
+  return clipUtf8(base, max - utf8Length(suffix)) + suffix;
+}
+// MariaDB's own: PRIMARY, a unique key named after its column (numbered from _2), a foreign key given its name
+const mariadbName = (kind, table, column, number, max) => kind === 'pk' ? 'PRIMARY'
+  : kind === 'unique' ? (number ? clipUtf8(column, max - utf8Length('_' + (number + 1))) + '_' + (number + 1) : column)
+  : givenName(kind, table, column, number, max);
+// PostgreSQL's own: table_column_fkey (table_pkey, table_column_key), the longer name cut first until it fits,
+// then numbered fkey1, fkey2…
+function postgresName(kind, table, column, number, max) {
+  const label = { pk: 'pkey', unique: 'key', fk: 'fkey' }[kind] + (number || ''), second = kind === 'pk' ? '' : column;
+  const room = max - utf8Length(label) - 1 - (second ? 1 : 0);
+  let a = utf8Length(table), b = utf8Length(second);
+  while (a + b > room) { if (a > b) a--; else b--; }
+  return [clipUtf8(table, a), ...(second ? [clipUtf8(second, b)] : []), label].join('_');
+}
+
+// Takes each constraint's name in turn, as the script makes them: { name, sql } with sql "CONSTRAINT name "
+// for one the database wouldn't give that name itself (D.names.own), "" otherwise. A name already taken where
+// it must be unique (D.names.scope: per table, or for the whole schema) gets the next number.
+function constraintNamer(D) {
+  const N = D.names, taken = new Set();
+  if (!N) return () => ({ name: null, sql: '' });
+  return (kind, table, column = '') => {
+    const key = name => { const k = (N.scope[kind] === 'table' ? table : '') + '\u0000' + name; return N.exact ? k : k.toLowerCase(); };
+    let name;
+    for (let n = 0; ; n++) {
+      name = N.name(kind, table, column, n, N.max);
+      if (kind === 'pk' && N.pk) break; // MariaDB's is PRIMARY in every table
+      if (!taken.has(key(name))) { taken.add(key(name)); break; }
+    }
+    const own = N.own.includes(kind) && name === N.name(kind, table, column, 0, N.max);
+    return { name, sql: own ? '' : `CONSTRAINT ${D.q(name)} ` };
+  };
+}
 
 // ─── Shared by the scripts ───────────────────────────────────────────────────
 
@@ -106,7 +161,7 @@ const enumCheckSQL = (c, Q) => enumValues(c.effType) ? ` CHECK (${Q(c.name)} IN 
 function colDefault(c, D) {
   const d = c.default;
   if (d === 'now') return /^date\b/.test(c.effType) ? D.today : 'CURRENT_TIMESTAMP';
-  if (isBoolType(c.effType) && /^(true|false|0|1)$/.test(d)) return D.bool(d === 'true' || d === '1');
+  if (isBoolType(c.effType) && /^(true|false|0|1)$/.test(d)) return D.bool(d === 'true' || d === '1', c);
   if (d === 'true' || d === 'false') return d === 'true' ? '1' : '0'; // in a number column
   if (d === 'null') return 'NULL';
   if (d[0] !== "'") return d;
@@ -119,10 +174,11 @@ const defaultSQL = (c, D) => {
   return ' DEFAULT ' + (D.defaultFor ? D.defaultFor(c, v) : v);
 };
 
-// D.action gives null for an action the database only has as its default (Oracle's NO ACTION)
+// The actions the database writes; NO ACTION goes without saying, and RESTRICT where it is the same (D.noActions)
 const fkActionsSQL = (c, D) => [['DELETE', c.onDelete], ['UPDATE', c.onUpdate]]
-  .map(([on, a]) => a && D.action(a) ? ` ON ${on} ${D.action(a)}` : '').join('');
-const fkSQL = (c, D) => `FOREIGN KEY (${D.q(c.name)}) REFERENCES ${D.q(c.target.name)}(${D.q(c.targetCol.name)})` + fkActionsSQL(c, D);
+  .map(([on, a]) => a && !D.noActions.includes(a) ? ` ON ${on} ${a.toUpperCase()}` : '').join('');
+const fkSQL = (c, D, named = '') =>
+  `${named}FOREIGN KEY (${D.q(c.name)}) REFERENCES ${tableSQL(D, c.target.name)}(${D.q(c.targetCol.name)})` + fkActionsSQL(c, D);
 const keyList = (cols, Q) => cols.map(c => Q(c.name)).join(', ');
 const column = (c, w, Q, type, rest) => `  ${Q(c.name).padEnd(w)} ${type}${rest}`;
 const nullSQL = c => c.nullable ? ' NULL' : ' NOT NULL';
@@ -139,7 +195,7 @@ function namedIndexes(t, taken, D) {
   });
 }
 const createIndexes = (t, taken, D) => namedIndexes(t, taken, D).map(ix =>
-  `CREATE INDEX ${D.q(ix.name)} ON ${D.q(t.name)} (${ix.cols.map(D.q).join(', ')});`);
+  `CREATE INDEX ${D.q(ix.name)} ON ${tableSQL(D, t.name)} (${ix.cols.map(D.q).join(', ')});`);
 
 const tablesOf = tables => topoOrder(tables.filter(t => t.cols.length));
 const isKey = c => pointsToPk(c) || c.targetCol.unique;
@@ -171,51 +227,148 @@ function linkTypeProblems(tables, family, why) {
   return problems;
 }
 
-// ─── MariaDB and MySQL ───────────────────────────────────────────────────────
-// One script for both, with what differs in DIALECTS. UUID and INET are MariaDB 10.7+ only,
-// and not in MySQL: text that holds one fits both.
+// ─── Types ───────────────────────────────────────────────────────────────────
+// A type as jaidb writes it for the database: vc as D.varchar(n), a short name as D.types has it
+// ({ name: [sql, the sql when unsigned, 'sized': its size kept where it has one] }), anything else in capitals.
+// D.keepType gives the types written otherwise here, where jaidb's spelling is not the database's yet.
 
+// Where D.signless, UNSIGNED goes (it is MariaDB's and MySQL's): a number that may not be signed is just the number.
+function typeSQL(t, D) {
+  const kept = D.keepType?.(t);
+  if (kept) return kept;
+  const { base, args, unsigned } = typeParts(t), row = D.types?.[base];
+  const sql = base === 'vc' ? sqlType(t).replace(/^VARCHAR/, D.varchar) : !row ? sqlType(t)
+    : unsigned && row[1] ? row[1] : row[2] === 'sized' && args != null ? row[0] + sqlType(t).slice(base.length) : row[0];
+  return D.signless ? sql.replace(/ (UN)?SIGNED| ZEROFILL/g, '') : sql;
+}
+const TEXT_TYPES = ['text', 'tinytext', 'mediumtext', 'longtext'], BLOB_TYPES = ['blob', 'tinyblob', 'mediumblob', 'longblob'];
+const typeRows = (names, row) => Object.fromEntries(names.map(n => [n, row]));
+
+// MariaDB and MySQL: as written. UUID and INET are MariaDB 10.7+ only, and not in MySQL: text that holds one fits both.
 const mariadbType = t => ({ uuid: 'CHAR(36)', inet4: 'VARCHAR(15)', inet6: 'VARCHAR(45)' })[typeParts(t).base] ?? sqlType(t);
+
+// SQLite takes the type names as written and only uses them as a hint, but every integer is INTEGER (only an
+// INTEGER PRIMARY KEY numbers its rows) and an enum is TEXT with a CHECK.
+const SQLITE_TYPES = { ...typeRows(['int', 'bigint', 'smallint', 'mediumint', 'tinyint'], ['INTEGER']), bool: ['BOOLEAN'] };
+
+// PostgreSQL: an unsigned number needs the next size up.
+const PG_TYPES = {
+  tinyint: ['SMALLINT'], smallint: ['SMALLINT', 'INT'], mediumint: ['INT'], int: ['INT', 'BIGINT'], bigint: ['BIGINT', 'NUMERIC(20)'],
+  datetime: ['TIMESTAMP'], double: ['DOUBLE PRECISION'], float: ['REAL'], bool: ['BOOLEAN'], decimal: ['NUMERIC', '', 'sized'],
+  ...typeRows(TEXT_TYPES, ['TEXT']), ...typeRows([...BLOB_TYPES, 'binary', 'varbinary'], ['BYTEA']), year: ['SMALLINT'],
+};
+const PG_KEPT = { enum: 'TEXT', set: 'TEXT', inet4: 'INET', inet6: 'INET', geometry: 'TEXT', linestring: 'TEXT', polygon: 'TEXT' };
+const pgType = t => typeSQL(t, DIALECTS.postgres);
+
+// SQL Server: text is NVARCHAR, so any language fits.
+const MSSQL_TYPES = {
+  mediumint: ['INT'], int: ['INT', 'BIGINT'], datetime: ['DATETIME2'], timestamp: ['DATETIME2'], double: ['FLOAT'], float: ['REAL'],
+  bool: ['BIT'], ...typeRows([...TEXT_TYPES, 'json'], ['NVARCHAR(MAX)']), ...typeRows(BLOB_TYPES, ['VARBINARY(MAX)']),
+  uuid: ['UNIQUEIDENTIFIER'], year: ['SMALLINT'],
+};
+const MSSQL_KEPT = { boolean: 'BIT', set: 'NVARCHAR(MAX)', serial: 'BIGINT', inet4: 'NVARCHAR(15)', inet6: 'NVARCHAR(45)',
+  geometry: 'NVARCHAR(MAX)', point: 'NVARCHAR(MAX)', linestring: 'NVARCHAR(MAX)', polygon: 'NVARCHAR(MAX)' };
+const MSSQL_UNSIGNED = { smallint: 'INT', bigint: 'DECIMAL(20,0)' };
+function mssqlKeptType(t) {
+  const { base, args, unsigned } = typeParts(t);
+  if (base === 'vc' && +(args ?? DEFAULT_VC) > 4000) return 'NVARCHAR(MAX)';
+  if (base === 'enum') return `NVARCHAR(${Math.max(1, ...enumOptions(t).map(v => v.length))})`;
+  if (unsigned && MSSQL_UNSIGNED[base]) return MSSQL_UNSIGNED[base];
+  return MSSQL_KEPT[base];
+}
+const mssqlType = t => typeSQL(t, DIALECTS.mssql);
+const isMax = t => /\(MAX\)/.test(mssqlType(t));
+
+// ─── The script ──────────────────────────────────────────────────────────────
+// One for every database, as jaidb's generate_schema_sql writes it, with what differs in DIALECTS: tables in
+// key order, each with its columns (type, NULL, numbering, DEFAULT, UNIQUE), its primary key and its foreign
+// keys; a key to a table made later is added after it (where D.fkInline, as SQLite's are, it goes in the table
+// all the same). Before them the tables are dropped, after them their indexes made.
+
+// The names the constraints take, table by table, in the order the script makes them
+function constraintNames(order, D) {
+  const take = constraintNamer(D), names = new Map();
+  const pointedTo = new Set(order.flatMap(t => t.cols.filter(c => c.target).map(c => c.targetCol)));
+  // where D.nullUniqueIndex, a unique column that may be null is a filtered index: SQL Server's UNIQUE allows
+  // one NULL only. An FK may only point to a real UNIQUE constraint, so one that is pointed to keeps one.
+  const plainUnique = c => c.unique && (!D.nullUniqueIndex || !c.nullable || pointedTo.has(c));
+  const created = new Set();
+  for (const t of order) {
+    created.add(t);
+    const rowid = D.numberingIsKey ? t.cols.find(c => c.autoInc) : null;
+    const unique = new Map(t.cols.filter(plainUnique).map(c => [c, take('unique', t.name, c.name)]));
+    const pk = t.pkCols.length && !rowid ? take('pk', t.name) : null;
+    const multi = t.multiUniques.filter(u => !D.nullUniqueIndex || !u.cols.some(c => c.nullable))
+      .map(u => ({ cols: u.cols, ...take('unique', t.name, u.cols.map(c => c.name).join('_')) }));
+    const fks = t.cols.filter(c => c.target).map(c => ({ c, later: !created.has(c.target) && !D.fkInline, ...take('fk', t.name, c.name) }));
+    names.set(t, { rowid, unique, plainUnique, pk, multi, fks });
+  }
+  return names;
+}
+// The foreign keys added after their tables: [{ t, c, name }]
+const laterKeys = (order, D) => [...constraintNames(order, D)].flatMap(([t, n]) => n.fks.filter(k => k.later).map(k => ({ t, ...k })));
 
 // MariaDB needs an index on the column a foreign key points to. True when a key or index already starts with it.
 function hasIndex(t, c) {
   return c.unique || t.pkCols[0] === c || t.multiUniques.some(u => u.cols[0] === c) ||
     (t.indexes ?? []).some(ix => ix.cols[0]?.toLowerCase() === c.name.toLowerCase());
 }
+// Where D.inlineIndexes (MariaDB) the indexes go inside CREATE TABLE: one a foreign key needs must be there
+// before the key is made
+function inlineIndexes(t, tables, D) {
+  // names MariaDB gives the indexes it makes itself: a UNIQUE or FOREIGN KEY one is named after its first column
+  const taken = new Set(['primary', ...t.cols.filter(c => c.unique || c.target).map(c => c.name.toLowerCase()),
+    ...t.multiUniques.map(u => u.cols[0].name.toLowerCase())]);
+  const pointedTo = new Set(tables.flatMap(o => o.cols.filter(c => c.target === t).map(c => c.targetCol)));
+  const needed = t.cols.filter(c => pointedTo.has(c) && !hasIndex(t, c))
+    .map(c => ({ name: shortName(indexName(t.name, [c.name]), D.maxName), cols: [c.name] }));
+  for (const ix of needed) taken.add(ix.name.toLowerCase());
+  return [...namedIndexes(t, taken, D), ...needed].map(ix => `  INDEX ${D.q(ix.name)} (${ix.cols.map(D.q).join(', ')})`);
+}
 
-// The indexes go inside CREATE TABLE: one a foreign key needs must be there before the key is made
-function genMariaDB(tables, D) {
-  const Q = D.q;
+function genSchema(tables, D) {
+  const Q = D.q, T = n => tableSQL(D, n);
   const { order, cyclic } = tablesOf(tables);
-  const out = ['-- ' + D.name, ''];
+  const out = ['-- ' + D.name, ...(D.keysAtStart?.(cyclic) ?? []), ''];
   if (!order.length) return out.join('\n');
-  if (cyclic) out.push('SET FOREIGN_KEY_CHECKS = 0;');
-  out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${Q(t.name)};`), '');
-  const created = new Set(), deferred = [];
+  const names = constraintNames(order, D);
+  if (cyclic && D.keysOff) out.push(D.keysOff);
+  // where D.dropKey, the keys added after their tables go first, or the tables they join can't be dropped
+  if (D.dropKey) out.push(...laterKeys(order, D).map(({ t, name }) => D.dropKey(T(t.name), Q(name))));
+  out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${T(t.name)}${D.dropTail ? ' ' + D.dropTail : ''};`), '');
+  const deferred = [], filtered = [], indexTaken = new Set();
+  const filteredUnique = (t, cols) => {
+    const name = givenName('unique', t.name, cols.map(c => c.name).join('_'), 0, D.maxName);
+    indexTaken.add(name.toLowerCase());
+    filtered.push(`CREATE UNIQUE INDEX ${Q(name)} ON ${T(t.name)} (${keyList(cols, Q)}) WHERE ${cols.map(c => Q(c.name) + ' IS NOT NULL').join(' AND ')};`);
+  };
   for (const t of order) {
-    created.add(t);
-    const w = colWidth(t, Q);
-    const defs = t.cols.map(c => column(c, w, Q, mariadbType(c.effType),
-      nullSQL(c) + defaultSQL(c, D) + (c.autoInc ? ' AUTO_INCREMENT' : '') + (c.unique ? ' UNIQUE' : '')));
-    if (t.pkCols.length) defs.push(`  PRIMARY KEY (${keyList(t.pkCols, Q)})`);
-    for (const u of t.multiUniques) defs.push(`  UNIQUE (${keyList(u.cols, Q)})`);
-    // names MariaDB gives the indexes it makes itself: a UNIQUE or FOREIGN KEY one is named after its first column
-    const taken = new Set(['primary', ...t.cols.filter(c => c.unique || c.target).map(c => c.name.toLowerCase()),
-      ...t.multiUniques.map(u => u.cols[0].name.toLowerCase())]);
-    const pointedTo = new Set(tables.flatMap(o => o.cols.filter(c => c.target === t).map(c => c.targetCol)));
-    const needed = t.cols.filter(c => pointedTo.has(c) && !hasIndex(t, c))
-      .map(c => ({ name: shortName(indexName(t.name, [c.name]), D.maxName), cols: [c.name] }));
-    for (const ix of needed) taken.add(ix.name.toLowerCase());
-    for (const ix of [...namedIndexes(t, taken, D), ...needed]) defs.push(`  INDEX ${Q(ix.name)} (${ix.cols.map(Q).join(', ')})`);
-    for (const c of t.cols) {
-      if (!c.target) continue;
-      if (created.has(c.target)) defs.push('  ' + fkSQL(c, D));
-      else deferred.push(`ALTER TABLE ${Q(t.name)} ADD ${fkSQL(c, D)};`);
+    const n = names.get(t), w = colWidth(t, Q);
+    const defs = t.cols.map(c => {
+      const auto = c.autoInc ? D.autoSQL : '', unique = n.unique.get(c);
+      const rest = D.autoAlone && c.autoInc ? auto // Oracle: the identity says the rest
+        : (D.defaultFirst ? defaultSQL(c, D) + nullSQL(c) : nullSQL(c) + auto + defaultSQL(c, D)) +
+          (unique ? ` ${unique.sql}UNIQUE` : '') + (D.enumCheck ? enumCheckSQL(c, Q) : '');
+      return column(c, w, Q, D.type ? D.type(c.effType) : typeSQL(c.effType, D), rest);
+    });
+    if (n.pk) defs.push(`  ${n.pk.sql}PRIMARY KEY (${keyList(t.pkCols, Q)})`);
+    for (const c of t.cols) if (c.unique && !n.plainUnique(c)) filteredUnique(t, [c]);
+    for (const u of t.multiUniques) if (!n.multi.some(m => m.cols === u.cols)) filteredUnique(t, u.cols);
+    for (const u of n.multi) defs.push(`  ${u.sql}UNIQUE (${keyList(u.cols, Q)})`);
+    if (D.inlineIndexes) defs.push(...inlineIndexes(t, tables, D));
+    for (const k of n.fks) {
+      if (k.later) deferred.push(`ALTER TABLE ${T(t.name)} ADD ${fkSQL(k.c, D, k.sql)}${D.deferredTail ?? ''};`);
+      else defs.push('  ' + fkSQL(k.c, D, k.sql));
     }
-    out.push(`CREATE TABLE ${Q(t.name)} (\n${defs.join(',\n')}\n);`, '');
+    out.push(`CREATE TABLE ${T(t.name)} (\n${defs.join(',\n')}\n);`, '');
   }
   if (deferred.length) out.push(...deferred, '');
-  if (cyclic) out.push('SET FOREIGN_KEY_CHECKS = 1;', '');
+  if (!D.inlineIndexes) { // an index name is for the whole schema
+    const skip = D.skipIndexes?.(tables) ?? new Set();
+    const indexes = [...filtered, ...order.flatMap(t => createIndexes({ ...t, indexes: (t.indexes ?? []).filter(ix => !skip.has(ix)) }, indexTaken, D))];
+    if (indexes.length) out.push(...indexes, '');
+  }
+  if (cyclic && D.keysOn) out.push(D.keysOn, '');
   return out.join('\n');
 }
 
@@ -241,158 +394,14 @@ function mysqlProblems(tables) {
   return problems;
 }
 
-// ─── SQLite ──────────────────────────────────────────────────────────────────
-// SQLite takes the same type names (VARCHAR(50), DATE, DECIMAL(8,2)…) and only uses them as a hint,
-// except: an Id that numbers itself is INTEGER PRIMARY KEY, and an enum is TEXT with a CHECK.
-// Tables may point to tables made later, so they are made in key order only to read well.
-
-function genSQLite(tables, D) {
-  const Q = D.q;
-  const { order, cyclic } = tablesOf(tables);
-  const out = ['-- ' + D.name, cyclic ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;', ''];
-  if (!order.length) return out.join('\n');
-  out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${Q(t.name)};`), '');
-  for (const t of order) {
-    const w = colWidth(t, Q), rowid = t.cols.find(c => c.autoInc);
-    const defs = t.cols.map(c => c === rowid
-      ? column(c, w, Q, 'INTEGER PRIMARY KEY', '')
-      : column(c, w, Q, /^(enum|set)\(/.test(c.effType) ? 'TEXT' : sqlType(c.effType),
-        nullSQL(c) + defaultSQL(c, D) + (c.unique ? ' UNIQUE' : '') + enumCheckSQL(c, Q)));
-    if (t.pkCols.length && !rowid) defs.push(`  PRIMARY KEY (${keyList(t.pkCols, Q)})`);
-    for (const u of t.multiUniques) defs.push(`  UNIQUE (${keyList(u.cols, Q)})`);
-    for (const c of t.cols) if (c.target) defs.push('  ' + fkSQL(c, D));
-    out.push(`CREATE TABLE ${Q(t.name)} (\n${defs.join(',\n')}\n);`, '');
-  }
-  const taken = new Set(); // an index name is for the whole database, not per table
-  const indexes = order.flatMap(t => createIndexes(t, taken, D));
-  if (indexes.length) out.push(...indexes, '');
-  if (cyclic) out.push('PRAGMA foreign_keys = ON;', '');
-  return out.join('\n');
-}
-
-// ─── PostgreSQL ──────────────────────────────────────────────────────────────
-// Names are left unquoted (Postgres folds them to lower case) unless they are reserved.
-// An Id that numbers itself is GENERATED BY DEFAULT AS IDENTITY, so the sample rows can
-// give their own; the numbering then moves past them.
-
-const PG_TYPES = { tinyint: 'SMALLINT', smallint: 'SMALLINT', mediumint: 'INT', int: 'INT', integer: 'INT', bigint: 'BIGINT',
-  serial: 'BIGINT', bool: 'BOOLEAN', boolean: 'BOOLEAN', bit: 'BOOLEAN', float: 'REAL', double: 'DOUBLE PRECISION',
-  real: 'DOUBLE PRECISION', tinytext: 'TEXT', text: 'TEXT', mediumtext: 'TEXT', longtext: 'TEXT', enum: 'TEXT', set: 'TEXT',
-  json: 'JSONB', binary: 'BYTEA', varbinary: 'BYTEA', tinyblob: 'BYTEA', blob: 'BYTEA', mediumblob: 'BYTEA',
-  longblob: 'BYTEA', datetime: 'TIMESTAMP', timestamp: 'TIMESTAMP', year: 'SMALLINT', uuid: 'UUID', inet4: 'INET',
-  inet6: 'INET', geometry: 'TEXT', point: 'POINT', linestring: 'TEXT', polygon: 'TEXT' };
-// an unsigned number needs the next size up
-const PG_UNSIGNED = { tinyint: 'SMALLINT', smallint: 'INT', mediumint: 'INT', int: 'BIGINT', integer: 'BIGINT', bigint: 'NUMERIC(20)' };
-function pgType(t) {
-  const { base, unsigned } = typeParts(t);
-  return (unsigned && PG_UNSIGNED[base]) || PG_TYPES[base] || sqlType(t).replace(/ (UN)?SIGNED| ZEROFILL/g, '');
-}
-
-// Shared with Oracle: D.type gives the column's type, D.dropTail what DROP TABLE ends with,
-// D.defaultFirst puts DEFAULT before NOT NULL, D.skipIndexes(t) the indexes the database refuses
-function genPostgres(tables, D) {
-  const Q = D.q;
-  const { order } = tablesOf(tables);
-  const out = ['-- ' + D.name, ''];
-  if (!order.length) return out.join('\n');
-  out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${Q(t.name)} ${D.dropTail};`), '');
-  const created = new Set(), deferred = [];
-  for (const t of order) {
-    created.add(t);
-    const w = colWidth(t, Q);
-    const defs = t.cols.map(c => column(c, w, Q, D.type(c.effType), c.autoInc
-      ? ' GENERATED BY DEFAULT AS IDENTITY'
-      : (D.defaultFirst ? defaultSQL(c, D) + nullSQL(c) : nullSQL(c) + defaultSQL(c, D)) + (c.unique ? ' UNIQUE' : '') + enumCheckSQL(c, Q)));
-    if (t.pkCols.length) defs.push(`  PRIMARY KEY (${keyList(t.pkCols, Q)})`);
-    for (const u of t.multiUniques) defs.push(`  UNIQUE (${keyList(u.cols, Q)})`);
-    for (const c of t.cols) {
-      if (!c.target) continue;
-      // a key to a table made later is added after it, and checked at COMMIT so sample rows can go in any order
-      if (created.has(c.target)) defs.push('  ' + fkSQL(c, D));
-      else deferred.push(`ALTER TABLE ${Q(t.name)} ADD ${fkSQL(c, D)} DEFERRABLE INITIALLY DEFERRED;`);
-    }
-    out.push(`CREATE TABLE ${Q(t.name)} (\n${defs.join(',\n')}\n);`, '');
-  }
-  if (deferred.length) out.push(...deferred, '');
-  const taken = new Set(); // index names are for the whole schema
-  const skip = D.skipIndexes?.(tables) ?? new Set();
-  const indexes = order.flatMap(t => createIndexes({ ...t, indexes: (t.indexes ?? []).filter(ix => !skip.has(ix)) }, taken, D));
-  if (indexes.length) out.push(...indexes, '');
-  return out.join('\n');
-}
-
 // Postgres compares a foreign key's types loosely: any integer to any integer, any text to any text
 const pgFamily = t => {
   const s = pgType(t);
-  return /^(SMALLINT|INT|BIGINT)$/.test(s) ? 'integer' : /^(VARCHAR|CHAR|TEXT)\b/.test(s) ? 'text'
+  return /^(SMALLINT|INT|BIGINT|SERIAL)$/.test(s) ? 'integer' : /^(VARCHAR|CHAR|TEXT)\b/.test(s) ? 'text'
     : /^(NUMERIC|DECIMAL)\b/.test(s) ? 'numeric' : s.replace(/\(.*\)/, '');
 };
 
 const postgresProblems = tables => [...keyProblems(tables, 'PostgreSQL'), ...linkTypeProblems(tables, pgFamily, "PostgreSQL can't link them.")];
-
-// ─── SQL Server ──────────────────────────────────────────────────────────────
-// Text is NVARCHAR, so any language fits. An Id that numbers itself is IDENTITY(1,1).
-// A unique column that may be null is a filtered unique index: SQL Server's UNIQUE allows one NULL only.
-
-const MSSQL_TYPES = { tinyint: 'TINYINT', smallint: 'SMALLINT', mediumint: 'INT', int: 'INT', integer: 'INT', bigint: 'BIGINT',
-  serial: 'BIGINT', bool: 'BIT', boolean: 'BIT', bit: 'BIT', float: 'REAL', double: 'FLOAT', real: 'FLOAT',
-  tinytext: 'NVARCHAR(MAX)', text: 'NVARCHAR(MAX)', mediumtext: 'NVARCHAR(MAX)', longtext: 'NVARCHAR(MAX)',
-  json: 'NVARCHAR(MAX)', set: 'NVARCHAR(MAX)', tinyblob: 'VARBINARY(MAX)', blob: 'VARBINARY(MAX)',
-  mediumblob: 'VARBINARY(MAX)', longblob: 'VARBINARY(MAX)', datetime: 'DATETIME2', timestamp: 'DATETIME2', year: 'SMALLINT',
-  uuid: 'UNIQUEIDENTIFIER', inet4: 'NVARCHAR(15)', inet6: 'NVARCHAR(45)', geometry: 'NVARCHAR(MAX)', point: 'NVARCHAR(MAX)',
-  linestring: 'NVARCHAR(MAX)', polygon: 'NVARCHAR(MAX)' };
-const MSSQL_UNSIGNED = { smallint: 'INT', mediumint: 'INT', int: 'BIGINT', integer: 'BIGINT', bigint: 'DECIMAL(20,0)' };
-function mssqlType(t) {
-  const { base, args, unsigned } = typeParts(t);
-  if (base === 'vc' || base === 'varchar') { const n = +(args ?? DEFAULT_VC); return n > 4000 ? 'NVARCHAR(MAX)' : `NVARCHAR(${n})`; }
-  if (base === 'char') { const n = +(args ?? 1); return n > 4000 ? 'NVARCHAR(MAX)' : `NCHAR(${n})`; }
-  if (base === 'enum') return `NVARCHAR(${Math.max(1, ...enumOptions(t).map(v => v.length))})`;
-  return (unsigned && MSSQL_UNSIGNED[base]) || MSSQL_TYPES[base] || sqlType(t).replace(/ (UN)?SIGNED| ZEROFILL/g, '');
-}
-const isMax = t => /\(MAX\)/.test(mssqlType(t));
-
-function genMSSQL(tables, D) {
-  const Q = D.q;
-  const { order } = tablesOf(tables);
-  const out = ['-- ' + D.name, ''];
-  if (!order.length) return out.join('\n');
-  // the keys added after their tables go first, or the tables they join can't be dropped
-  const later = new Map(), made = new Set(); // column → its table
-  for (const t of order) { made.add(t); for (const c of t.cols) if (c.target && !made.has(c.target)) later.set(c, t); }
-  const fkNameOf = (t, c) => Q(shortName(`fk_${t.name}_${c.name}`, D.maxName));
-  for (const [c, t] of later) out.push(`IF OBJECT_ID(N'${t.name}', N'U') IS NOT NULL ALTER TABLE ${Q(t.name)} DROP CONSTRAINT IF EXISTS ${fkNameOf(t, c)};`);
-  out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${Q(t.name)};`), '');
-  const deferred = [], filtered = [], taken = new Set();
-  const filteredUnique = (t, cols) => {
-    const name = shortName(`uq_${t.name}_${cols.map(c => c.name).join('_')}`, D.maxName);
-    taken.add(name.toLowerCase());
-    filtered.push(`CREATE UNIQUE INDEX ${Q(name)} ON ${Q(t.name)} (${keyList(cols, Q)}) WHERE ${cols.map(c => Q(c.name) + ' IS NOT NULL').join(' AND ')};`);
-  };
-  // an FK may only point to a real UNIQUE constraint, so a nullable unique column that is pointed to keeps one
-  const pointedTo = new Set(tables.flatMap(t => t.cols.filter(c => c.target).map(c => c.targetCol)));
-  const plainUnique = c => c.unique && (!c.nullable || pointedTo.has(c));
-  for (const t of order) {
-    const w = colWidth(t, Q);
-    const defs = t.cols.map(c => column(c, w, Q, mssqlType(c.effType),
-      (c.autoInc ? ' IDENTITY(1,1)' : '') + nullSQL(c) + defaultSQL(c, D) + (plainUnique(c) ? ' UNIQUE' : '') + enumCheckSQL(c, Q)));
-    if (t.pkCols.length) defs.push(`  PRIMARY KEY (${keyList(t.pkCols, Q)})`);
-    for (const c of t.cols) if (c.unique && !plainUnique(c)) filteredUnique(t, [c]);
-    for (const u of t.multiUniques) {
-      if (u.cols.some(c => c.nullable)) filteredUnique(t, u.cols);
-      else defs.push(`  UNIQUE (${keyList(u.cols, Q)})`);
-    }
-    for (const c of t.cols) {
-      if (!c.target) continue;
-      if (later.has(c)) deferred.push(`ALTER TABLE ${Q(t.name)} ADD CONSTRAINT ${fkNameOf(t, c)} ${fkSQL(c, D)};`);
-      else defs.push('  ' + fkSQL(c, D));
-    }
-    out.push(`CREATE TABLE ${Q(t.name)} (\n${defs.join(',\n')}\n);`, '');
-  }
-  if (deferred.length) out.push(...deferred, '');
-  const indexes = [...filtered, ...order.flatMap(t => createIndexes(t, taken, D))];
-  if (indexes.length) out.push(...indexes, '');
-  return out.join('\n');
-}
 
 function mssqlProblems(tables) {
   const problems = [...keyProblems(tables, 'SQL Server'), ...lobKeyProblems(tables, isMax, 'SQL Server'),
@@ -471,20 +480,35 @@ function oracleProblems(tables) {
 
 // ─── The databases ───────────────────────────────────────────────────────────
 // dqIdent: "x" is a name, not a string. backslash: \ escapes in strings.
+// The script (genSchema): q quotes a name, schema is the default one tables are named in, type(t) or
+// types/keepType/varchar/signless give a column's type, names says how constraints are named (constraintNamer),
+// autoSQL numbers a column, noActions are the foreign key actions left unsaid. keysAtStart(cyclic), keysOff and
+// keysOn turn the foreign key checks off around a cycle; dropKey(table, name) drops a key before its table,
+// dropTail ends DROP TABLE. fkInline: keys to tables made later go in the table too. numberingIsKey: the
+// numbered column is the primary key in its own clause. nullUniqueIndex: a unique column that may be null is a
+// filtered unique index. inlineIndexes: indexes go inside CREATE TABLE. enumCheck: an enum gets a CHECK.
+// autoAlone, defaultFirst, deferredTail, skipIndexes: Oracle's, see genSchema.
 // Sample rows (sampleInserts): dataStart/dataEnd go around them, dataTable(t) around each table's.
 
 const sqlStr = s => `'${s.replace(/'/g, "''")}'`;
 const upperBool = b => b ? 'TRUE' : 'FALSE';
+const givenNames = (max, scope) => ({ name: givenName, own: [], scope: { pk: scope, unique: scope, fk: scope }, max });
 // What most of them have in common; each one says what differs
 const COMMON = {
   maxName: 64, dqIdent: true, backslash: false, str: sqlStr, bool: upperBool, today: 'CURRENT_DATE',
-  action: a => a.toUpperCase(), dataStart: () => [], dataEnd: () => [],
+  noActions: ['no action'], enumCheck: true, dataStart: () => [], dataEnd: () => [],
 };
 const MARIADB = {
-  ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true,
-  gen: genMariaDB, problems: mariadbProblems, str: s => sqlStr(s.replace(/\\/g, '\\\\')),
+  ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true, type: mariadbType,
+  names: { name: mariadbName, own: ['pk', 'unique'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema' }, max: 64 },
+  autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, enumCheck: false,
+  keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
+  problems: mariadbProblems, str: s => sqlStr(s.replace(/\\/g, '\\\\')),
   dataStart: () => ['SET FOREIGN_KEY_CHECKS = 0;'], dataEnd: () => ['SET FOREIGN_KEY_CHECKS = 1;'],
 };
+// The foreign keys PostgreSQL checks at COMMIT while the sample rows go in: those to tables made later
+const pgDeferred = (order, how) => laterKeys(order, DIALECTS.postgres).map(({ t, name }) =>
+  `ALTER TABLE ${tableSQL(DIALECTS.postgres, t.name)} ALTER CONSTRAINT ${DIALECTS.postgres.q(name)} ${how};`);
 const DIALECTS = {
   mariadb: MARIADB,
   mysql: {
@@ -493,36 +517,46 @@ const DIALECTS = {
     defaultFor: (c, v) => v === 'CURRENT_DATE' || isLobType(c.effType) ? `(${v})` : v,
   },
   sqlite: {
-    ...COMMON, name: 'SQLite', q: quoter(SQLITE_KEYWORDS, '"'),
-    gen: genSQLite, problems: tables => keyProblems(tables, 'SQLite'), // SQLite doesn't compare the types
+    ...COMMON, name: 'SQLite', q: quoter(SQLITE_KEYWORDS, '"'), types: SQLITE_TYPES, varchar: 'VARCHAR',
+    keepType: t => /^(enum|set)\(/.test(t) ? 'TEXT' : null, names: givenNames(Infinity, 'table'),
+    autoSQL: ' PRIMARY KEY AUTOINCREMENT', numberingIsKey: true, fkInline: true, // tables may point to tables made later
+    keysAtStart: cyclic => [cyclic ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;'], keysOn: 'PRAGMA foreign_keys = ON;',
+    problems: tables => keyProblems(tables, 'SQLite'), // SQLite doesn't compare the types
     dataStart: () => ['PRAGMA foreign_keys = OFF;'], dataEnd: () => ['PRAGMA foreign_keys = ON;'],
   },
   postgres: {
-    ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"'), maxName: 63,
-    gen: genPostgres, problems: postgresProblems, type: pgType, dropTail: 'CASCADE',
-    // one transaction, so keys to tables made later are checked at the end; then numbering goes on after the sample Ids
-    dataStart: () => ['BEGIN;'],
-    dataEnd: order => ['COMMIT;', ...order.flatMap(t => t.cols.filter(c => c.autoInc).map(c => {
-      const Q = DIALECTS.postgres.q, col = Q(c.name) === c.name ? c.name.toLowerCase() : c.name;
-      return `SELECT setval(pg_get_serial_sequence('${Q(t.name)}', '${col}'), MAX(${Q(c.name)})) FROM ${Q(t.name)};`;
+    ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"', '"', true), schema: 'public', maxName: 63,
+    types: PG_TYPES, keepType: t => PG_KEPT[typeParts(t).base], varchar: 'VARCHAR', signless: true,
+    names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema' }, max: 63, exact: true },
+    autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', dropTail: 'CASCADE', problems: postgresProblems,
+    bool: (b, c) => c && /^bit\b/.test(c.effType) ? `B'${b ? 1 : 0}'` : upperBool(b),
+    // one transaction, with the keys to tables made later checked at COMMIT, so the rows can go in in any order;
+    // then numbering goes on after the sample Ids
+    dataStart: (order, cyclic) => [...(cyclic ? pgDeferred(order, 'DEFERRABLE INITIALLY DEFERRED') : []), 'BEGIN;'],
+    dataEnd: (order, cyclic) => ['COMMIT;', ...(cyclic ? pgDeferred(order, 'NOT DEFERRABLE') : []), ...order.flatMap(t => t.cols.filter(c => c.autoInc).map(c => {
+      const T = tableSQL(DIALECTS.postgres, t.name), Q = DIALECTS.postgres.q;
+      return `SELECT setval(pg_get_serial_sequence(${sqlStr(T)}, ${sqlStr(c.name)}), COALESCE(MAX(${Q(c.name)}), 0) + 1, false) FROM ${T};`;
     }))],
   },
   mssql: {
-    ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), maxName: 128, nPrefix: true,
-    gen: genMSSQL, problems: mssqlProblems,
+    ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', maxName: 128, nPrefix: true,
+    types: MSSQL_TYPES, keepType: mssqlKeptType, varchar: 'NVARCHAR', signless: true, names: givenNames(128, 'schema'),
+    autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
+    dropKey: (T, name) => `IF OBJECT_ID(N'${T}', N'U') IS NOT NULL ALTER TABLE ${T} DROP CONSTRAINT IF EXISTS ${name};`,
     str: s => 'N' + sqlStr(s), bool: b => b ? '1' : '0', today: 'CAST(GETDATE() AS DATE)',
     bin: s => `CONVERT(VARBINARY(MAX), ${sqlStr(s)})`, // text doesn't turn into bytes by itself here
-    action: a => a === 'restrict' ? 'NO ACTION' : a.toUpperCase(), // no RESTRICT; NO ACTION is the same here
-    dataStart: (order, cyclic) => cyclic ? order.map(t => `ALTER TABLE ${DIALECTS.mssql.q(t.name)} NOCHECK CONSTRAINT ALL;`) : [],
-    dataEnd: (order, cyclic) => cyclic ? order.map(t => `ALTER TABLE ${DIALECTS.mssql.q(t.name)} WITH CHECK CHECK CONSTRAINT ALL;`) : [],
+    dataStart: (order, cyclic) => cyclic ? order.map(t => `ALTER TABLE ${tableSQL(DIALECTS.mssql, t.name)} NOCHECK CONSTRAINT ALL;`) : [],
+    dataEnd: (order, cyclic) => cyclic ? order.map(t => `ALTER TABLE ${tableSQL(DIALECTS.mssql, t.name)} WITH CHECK CHECK CONSTRAINT ALL;`) : [],
     // sample rows give their own Ids
-    dataTable: t => t.cols.some(c => c.autoInc) ? [[`SET IDENTITY_INSERT ${DIALECTS.mssql.q(t.name)} ON;`], [`SET IDENTITY_INSERT ${DIALECTS.mssql.q(t.name)} OFF;`]] : [[], []],
+    dataTable: t => t.cols.some(c => c.autoInc) ? [[`SET IDENTITY_INSERT ${tableSQL(DIALECTS.mssql, t.name)} ON;`], [`SET IDENTITY_INSERT ${tableSQL(DIALECTS.mssql, t.name)} OFF;`]] : [[], []],
   },
   oracle: {
     ...COMMON, name: 'Oracle', q: quoter(ORACLE_RESERVED, '"'), maxName: 128,
-    gen: genPostgres, problems: oracleProblems, type: oracleType, dropTail: 'CASCADE CONSTRAINTS', defaultFirst: true, skipIndexes: oracleSkipIndexes,
+    type: oracleType, problems: oracleProblems, dropTail: 'CASCADE CONSTRAINTS', defaultFirst: true, skipIndexes: oracleSkipIndexes,
+    // the identity says the rest; a key to a table made later is checked at COMMIT, so sample rows can go in in any order
+    autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', autoAlone: true, deferredTail: ' DEFERRABLE INITIALLY DEFERRED',
+    noActions: ['no action', 'restrict'], // what it does anyway
     today: 'TRUNC(SYSDATE)',
-    action: a => /^(cascade|set null)$/.test(a) ? a.toUpperCase() : null, // RESTRICT and NO ACTION are what it does anyway
     typed: (c, s) => /^date\b/.test(c.effType) ? `DATE ${sqlStr(s)}` : /^(datetime|timestamp)\b/.test(c.effType) ? `TIMESTAMP ${sqlStr(s)}` : undefined,
     bin: s => `UTL_RAW.CAST_TO_RAW(${sqlStr(s)})`,
     // one transaction, so keys to tables made later are checked at the end; then numbering goes on after the sample Ids
@@ -532,6 +566,6 @@ const DIALECTS = {
 };
 const dialectOf = d => DIALECTS[d] ?? DIALECTS.mariadb;
 
-function genSQL(tables, dialect = 'mariadb') { const D = dialectOf(dialect); return D.gen(tables, D); }
+function genSQL(tables, dialect = 'mariadb') { return genSchema(tables, dialectOf(dialect)); }
 // What the database refuses (or warns about) in the diagram
 function dialectProblems(tables, dialect = 'mariadb') { return dialectOf(dialect).problems(tables); }
