@@ -228,28 +228,64 @@ function linkTypeProblems(tables, family, why) {
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-// A type as jaidb writes it for the database: vc as D.varchar(n), a short name as D.types has it
-// ({ name: [sql, the sql when unsigned, 'sized': its size kept where it has one] }), anything else in capitals.
-// D.keepType gives the types written otherwise here, where jaidb's spelling is not the database's yet.
+// A type as jaidb writes it for the database (written_type), with no server version known: one past its size
+// limit as the type D.sizeLimits says ({ name: [max, instead, % the size] }); vc as D.varchar(n); a short name
+// as D.types has it ({ name: [sql, the sql when unsigned, 'sized': its size kept where it has one] }); one of
+// TYPE_FALLBACKS the database hasn't (D.native) as the first of its stand-ins the database has, else the last;
+// anything else in capitals. Where !D.signWords, UNSIGNED, SIGNED and ZEROFILL go (they are MariaDB's and MySQL's).
 
-// Where D.signless, UNSIGNED goes (it is MariaDB's and MySQL's): a number that may not be signed is just the number.
+const VALUES_VC = 'vc(values)'; // a vc as long as an enum's longest value, or a set's values together
+const TYPE_FALLBACKS = {
+  serial: ['bigint'], uuid: ['char(36)'], inet4: ['inet', 'vc(15)'], inet6: ['inet', 'vc(45)'], inet: ['vc(49)'], cidr: ['vc(49)'],
+  macaddr: ['vc(17)'], interval: ['vc(64)'], json: ['longtext'], jsonb: ['json', 'longtext'], xml: ['longtext'], geometry: ['longtext'],
+  point: ['geometry', 'longtext'], linestring: ['geometry', 'longtext'], polygon: ['geometry', 'longtext'], money: ['decimal(19,4)'],
+  rowversion: ['binary(8)'], enum: [VALUES_VC], set: [VALUES_VC],
+};
+const signless = s => s.replace(/ (unsigned|signed|zerofill)\b/gi, '');
+// Whether the database writes the type as it is, or by its own spelling: not as another that stands in
+const hasType = (t, D) => { const { base } = typeParts(t); return !!D.types?.[base] || !TYPE_FALLBACKS[base] || D.native.includes(base); };
+// The type that stands in for `t` where the database hasn't it: past its size limit, or at all; null where it has it
+function standIn(t, D) {
+  const { base, args } = typeParts(t), limit = D.sizeLimits?.[base];
+  if (limit && args != null && +args > limit[0]) return limit[1].replace('%', args);
+  if (hasType(t, D)) return null;
+  const list = TYPE_FALLBACKS[base], pick = list.find((c, i) => i === list.length - 1 || hasType(c, D));
+  return pick === VALUES_VC ? `vc(${Math.max(1, base === 'set' ? enumOptions(t).join(',').length : Math.max(0, ...enumOptions(t).map(v => v.length)))})` : pick;
+}
 function typeSQL(t, D) {
-  const kept = D.keepType?.(t);
-  if (kept) return kept;
-  const { base, args, unsigned } = typeParts(t), row = D.types?.[base];
-  const sql = base === 'vc' ? sqlType(t).replace(/^VARCHAR/, D.varchar) : !row ? sqlType(t)
-    : unsigned && row[1] ? row[1] : row[2] === 'sized' && args != null ? row[0] + sqlType(t).slice(base.length) : row[0];
-  return D.signless ? sql.replace(/ (UN)?SIGNED| ZEROFILL/g, '') : sql;
+  const instead = standIn(t, D);
+  if (instead) return typeSQL(instead, D);
+  const { base, args, rest, unsigned } = typeParts(t), row = D.types?.[base], tail = D.signWords ? rest : signless(rest);
+  if (base === 'vc') return `${D.varchar}(${args ?? DEFAULT_VC})` + sqlType(tail);
+  if (!row) return sqlType(t.slice(0, t.length - rest.length) + tail);
+  if (unsigned && row[1]) return row[1];
+  return row[2] === 'sized' && args != null ? row[0] + sqlType(signless(t.slice(base.length))) : row[0];
+}
+// Whether a key or unique key may be over a column of the type there (D.unkeyable)
+function keyable(t, D) {
+  let { base, args } = typeParts(t);
+  const limit = D.sizeLimits?.[base];
+  if (limit && args != null && +args > limit[0]) base = typeParts(limit[1].replace('%', args)).base;
+  if (TYPE_FALLBACKS[base] && !hasType(base, D)) base = typeParts(TYPE_FALLBACKS[base].at(-1)).base;
+  return !(D.unkeyable ?? []).includes(base);
 }
 const TEXT_TYPES = ['text', 'tinytext', 'mediumtext', 'longtext'], BLOB_TYPES = ['blob', 'tinyblob', 'mediumblob', 'longblob'];
 const typeRows = (names, row) => Object.fromEntries(names.map(n => [n, row]));
+const SPATIAL = ['geometry', 'point', 'linestring', 'polygon'];
 
-// MariaDB and MySQL: as written. UUID and INET are MariaDB 10.7+ only, and not in MySQL: text that holds one fits both.
-const mariadbType = t => ({ uuid: 'CHAR(36)', inet4: 'VARCHAR(15)', inet6: 'VARCHAR(45)' })[typeParts(t).base] ?? sqlType(t);
+// MariaDB: as written, but REAL is DOUBLE, and CHAR and BINARY hold 255 at most. UUID, INET6 and INET4 are its
+// own from 10.7, 10.5 and 10.10: with no version known, text that holds one.
+const MARIADB_TYPES = { real: ['DOUBLE'] };
+const MARIADB_NATIVE = [...SPATIAL, 'enum', 'set'];
+const MARIADB_SIZE_LIMITS = { char: [255, 'vc(%)'], binary: [255, 'varbinary(%)'] };
+// MySQL: no UUID nor INET; no key over TEXT, BLOB, JSON or a spatial type
+const MYSQL_NATIVE = ['json', ...SPATIAL, 'enum', 'set'];
+const MYSQL_UNKEYABLE = [...TEXT_TYPES, ...BLOB_TYPES, 'json', ...SPATIAL];
 
-// SQLite takes the type names as written and only uses them as a hint, but every integer is INTEGER (only an
-// INTEGER PRIMARY KEY numbers its rows) and an enum is TEXT with a CHECK.
-const SQLITE_TYPES = { ...typeRows(['int', 'bigint', 'smallint', 'mediumint', 'tinyint'], ['INTEGER']), bool: ['BOOLEAN'] };
+// SQLite takes any type name and only uses it as a hint, but every integer is INTEGER (only an INTEGER PRIMARY KEY
+// numbers its rows), and an enum or a set, whose list it can't take, is a vc (with a CHECK here).
+const SQLITE_TYPES = { float: ['REAL'], ...typeRows(['int', 'bigint', 'smallint', 'mediumint', 'tinyint'], ['INTEGER']), bool: ['BOOLEAN'] };
+const SQLITE_NATIVE = Object.keys(TYPE_FALLBACKS).filter(n => !['serial', 'enum', 'set'].includes(n));
 
 // PostgreSQL: an unsigned number needs the next size up.
 const PG_TYPES = {
@@ -257,25 +293,17 @@ const PG_TYPES = {
   datetime: ['TIMESTAMP'], double: ['DOUBLE PRECISION'], float: ['REAL'], bool: ['BOOLEAN'], decimal: ['NUMERIC', '', 'sized'],
   ...typeRows(TEXT_TYPES, ['TEXT']), ...typeRows([...BLOB_TYPES, 'binary', 'varbinary'], ['BYTEA']), year: ['SMALLINT'],
 };
-const PG_KEPT = { enum: 'TEXT', set: 'TEXT', inet4: 'INET', inet6: 'INET', geometry: 'TEXT', linestring: 'TEXT', polygon: 'TEXT' };
+const PG_NATIVE = ['uuid', 'inet', 'cidr', 'macaddr', 'interval', 'json', 'jsonb', 'xml', 'point', 'polygon', 'money'];
 const pgType = t => typeSQL(t, DIALECTS.postgres);
 
-// SQL Server: text is NVARCHAR, so any language fits.
+// SQL Server: text is NVARCHAR, so any language fits. NVARCHAR holds 4000 characters and the others 8000 bytes,
+// past which they are (MAX), which no key may be over; a BIT is one bit.
 const MSSQL_TYPES = {
-  mediumint: ['INT'], int: ['INT', 'BIGINT'], datetime: ['DATETIME2'], timestamp: ['DATETIME2'], double: ['FLOAT'], float: ['REAL'],
-  bool: ['BIT'], ...typeRows([...TEXT_TYPES, 'json'], ['NVARCHAR(MAX)']), ...typeRows(BLOB_TYPES, ['VARBINARY(MAX)']),
-  uuid: ['UNIQUEIDENTIFIER'], year: ['SMALLINT'],
+  smallint: ['SMALLINT', 'INT'], bigint: ['BIGINT', 'DECIMAL(20,0)'], mediumint: ['INT'], int: ['INT', 'BIGINT'],
+  datetime: ['DATETIME2'], timestamp: ['DATETIME2'], double: ['FLOAT'], float: ['REAL'], bool: ['BIT'],
+  ...typeRows([...TEXT_TYPES, 'json'], ['NVARCHAR(MAX)']), ...typeRows(BLOB_TYPES, ['VARBINARY(MAX)']), uuid: ['UNIQUEIDENTIFIER'], year: ['SMALLINT'],
 };
-const MSSQL_KEPT = { boolean: 'BIT', set: 'NVARCHAR(MAX)', serial: 'BIGINT', inet4: 'NVARCHAR(15)', inet6: 'NVARCHAR(45)',
-  geometry: 'NVARCHAR(MAX)', point: 'NVARCHAR(MAX)', linestring: 'NVARCHAR(MAX)', polygon: 'NVARCHAR(MAX)' };
-const MSSQL_UNSIGNED = { smallint: 'INT', bigint: 'DECIMAL(20,0)' };
-function mssqlKeptType(t) {
-  const { base, args, unsigned } = typeParts(t);
-  if (base === 'vc' && +(args ?? DEFAULT_VC) > 4000) return 'NVARCHAR(MAX)';
-  if (base === 'enum') return `NVARCHAR(${Math.max(1, ...enumOptions(t).map(v => v.length))})`;
-  if (unsigned && MSSQL_UNSIGNED[base]) return MSSQL_UNSIGNED[base];
-  return MSSQL_KEPT[base];
-}
+const MSSQL_SIZE_LIMITS = { vc: [4000, 'text'], char: [8000, 'text'], binary: [8000, 'blob'], varbinary: [8000, 'blob'], bit: [1, 'bigint'] };
 const mssqlType = t => typeSQL(t, DIALECTS.mssql);
 const isMax = t => /\(MAX\)/.test(mssqlType(t));
 
@@ -289,19 +317,23 @@ const isMax = t => /\(MAX\)/.test(mssqlType(t));
 function constraintNames(order, D) {
   const take = constraintNamer(D), names = new Map();
   const pointedTo = new Set(order.flatMap(t => t.cols.filter(c => c.target).map(c => c.targetCol)));
-  // where D.nullUniqueIndex, a unique column that may be null is a filtered index: SQL Server's UNIQUE allows
-  // one NULL only. An FK may only point to a real UNIQUE constraint, so one that is pointed to keeps one.
-  const plainUnique = c => c.unique && (!D.nullUniqueIndex || !c.nullable || pointedTo.has(c));
+  // where D.nullUniqueIndex, a unique key that may be null is a unique index of the rows where it isn't:
+  // SQL Server's UNIQUE allows one NULL only. An FK may only point to a constraint, so one pointed to stays one.
+  const isIndex = cols => D.nullUniqueIndex && cols.some(c => c.nullable) && !(cols.length === 1 && pointedTo.has(cols[0]));
   const created = new Set();
   for (const t of order) {
     created.add(t);
     const rowid = D.numberingIsKey ? t.cols.find(c => c.autoInc) : null;
-    const unique = new Map(t.cols.filter(plainUnique).map(c => [c, take('unique', t.name, c.name)]));
+    const unique = new Map(), indexes = [], multi = [];
+    for (const c of t.cols.filter(c => c.unique)) {
+      const k = take('unique', t.name, c.name);
+      if (isIndex([c])) indexes.push({ cols: [c], ...k });
+      else unique.set(c, k);
+    }
     const pk = t.pkCols.length && !rowid ? take('pk', t.name) : null;
-    const multi = t.multiUniques.filter(u => !D.nullUniqueIndex || !u.cols.some(c => c.nullable))
-      .map(u => ({ cols: u.cols, ...take('unique', t.name, u.cols.map(c => c.name).join('_')) }));
+    for (const u of t.multiUniques) (isIndex(u.cols) ? indexes : multi).push({ cols: u.cols, ...take('unique', t.name, u.cols.map(c => c.name).join('_')) });
     const fks = t.cols.filter(c => c.target).map(c => ({ c, later: !created.has(c.target) && !D.fkInline, ...take('fk', t.name, c.name) }));
-    names.set(t, { rowid, unique, plainUnique, pk, multi, fks });
+    names.set(t, { rowid, unique, indexes, pk, multi, fks });
   }
   return names;
 }
@@ -336,12 +368,7 @@ function genSchema(tables, D) {
   // where D.dropKey, the keys added after their tables go first, or the tables they join can't be dropped
   if (D.dropKey) out.push(...laterKeys(order, D).map(({ t, name }) => D.dropKey(T(t.name), Q(name))));
   out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${T(t.name)}${D.dropTail ? ' ' + D.dropTail : ''};`), '');
-  const deferred = [], filtered = [], indexTaken = new Set();
-  const filteredUnique = (t, cols) => {
-    const name = givenName('unique', t.name, cols.map(c => c.name).join('_'), 0, D.maxName);
-    indexTaken.add(name.toLowerCase());
-    filtered.push(`CREATE UNIQUE INDEX ${Q(name)} ON ${T(t.name)} (${keyList(cols, Q)}) WHERE ${cols.map(c => Q(c.name) + ' IS NOT NULL').join(' AND ')};`);
-  };
+  const deferred = [], indexTaken = new Set();
   for (const t of order) {
     const n = names.get(t), w = colWidth(t, Q);
     const defs = t.cols.map(c => {
@@ -352,8 +379,10 @@ function genSchema(tables, D) {
       return column(c, w, Q, D.type ? D.type(c.effType) : typeSQL(c.effType, D), rest);
     });
     if (n.pk) defs.push(`  ${n.pk.sql}PRIMARY KEY (${keyList(t.pkCols, Q)})`);
-    for (const c of t.cols) if (c.unique && !n.plainUnique(c)) filteredUnique(t, [c]);
-    for (const u of t.multiUniques) if (!n.multi.some(m => m.cols === u.cols)) filteredUnique(t, u.cols);
+    for (const ix of n.indexes) { // after the table, with the keys added later
+      indexTaken.add(ix.name.toLowerCase());
+      deferred.push(`CREATE UNIQUE INDEX ${Q(ix.name)} ON ${T(t.name)} (${keyList(ix.cols, Q)}) WHERE ${ix.cols.map(c => Q(c.name) + ' IS NOT NULL').join(' AND ')};`);
+    }
     for (const u of n.multi) defs.push(`  ${u.sql}UNIQUE (${keyList(u.cols, Q)})`);
     if (D.inlineIndexes) defs.push(...inlineIndexes(t, tables, D));
     for (const k of n.fks) {
@@ -365,7 +394,7 @@ function genSchema(tables, D) {
   if (deferred.length) out.push(...deferred, '');
   if (!D.inlineIndexes) { // an index name is for the whole schema
     const skip = D.skipIndexes?.(tables) ?? new Set();
-    const indexes = [...filtered, ...order.flatMap(t => createIndexes({ ...t, indexes: (t.indexes ?? []).filter(ix => !skip.has(ix)) }, indexTaken, D))];
+    const indexes = order.flatMap(t => createIndexes({ ...t, indexes: (t.indexes ?? []).filter(ix => !skip.has(ix)) }, indexTaken, D));
     if (indexes.length) out.push(...indexes, '');
   }
   if (cyclic && D.keysOn) out.push(D.keysOn, '');
@@ -382,7 +411,7 @@ const isLobType = t => /(text|blob)$|^json$/.test(typeParts(t).base);
 
 // MySQL 8.4 only links to a key, can't make a key of TEXT, and a key is at most 3072 bytes (768 characters)
 function mysqlProblems(tables) {
-  const problems = [...keyProblems(tables, 'MySQL'), ...lobKeyProblems(tables, isLobType, 'MySQL'), ...linkTypeProblems(tables, keyType, SAME_TYPE)];
+  const problems = [...keyProblems(tables, 'MySQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mysql), 'MySQL'), ...linkTypeProblems(tables, keyType, SAME_TYPE)];
   for (const t of tables) {
     for (const c of t.cols) {
       const { base, args } = typeParts(c.effType);
@@ -401,10 +430,11 @@ const pgFamily = t => {
     : /^(NUMERIC|DECIMAL)\b/.test(s) ? 'numeric' : s.replace(/\(.*\)/, '');
 };
 
-const postgresProblems = tables => [...keyProblems(tables, 'PostgreSQL'), ...linkTypeProblems(tables, pgFamily, "PostgreSQL can't link them.")];
+const postgresProblems = tables => [...keyProblems(tables, 'PostgreSQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.postgres), 'PostgreSQL'),
+  ...linkTypeProblems(tables, pgFamily, "PostgreSQL can't link them.")];
 
 function mssqlProblems(tables) {
-  const problems = [...keyProblems(tables, 'SQL Server'), ...lobKeyProblems(tables, isMax, 'SQL Server'),
+  const problems = [...keyProblems(tables, 'SQL Server'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mssql), 'SQL Server'),
     ...linkTypeProblems(tables, t => isMax(t) ? null : mssqlType(t), 'SQL Server needs the same type and length on both sides.')];
   for (const t of tables) {
     for (const c of t.cols) {
@@ -481,7 +511,7 @@ function oracleProblems(tables) {
 // ─── The databases ───────────────────────────────────────────────────────────
 // dqIdent: "x" is a name, not a string. backslash: \ escapes in strings.
 // The script (genSchema): q quotes a name, schema is the default one tables are named in, type(t) or
-// types/keepType/varchar/signless give a column's type, names says how constraints are named (constraintNamer),
+// types/native/sizeLimits/varchar/signWords give a column's type (typeSQL), unkeyable the types no key is over, names says how constraints are named (constraintNamer),
 // autoSQL numbers a column, noActions are the foreign key actions left unsaid. keysAtStart(cyclic), keysOff and
 // keysOn turn the foreign key checks off around a cycle; dropKey(table, name) drops a key before its table,
 // dropTail ends DROP TABLE. fkInline: keys to tables made later go in the table too. numberingIsKey: the
@@ -499,7 +529,8 @@ const COMMON = {
   noActions: ['no action'], enumCheck: true, dataStart: () => [], dataEnd: () => [],
 };
 const MARIADB = {
-  ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true, type: mariadbType,
+  ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true,
+  types: MARIADB_TYPES, native: MARIADB_NATIVE, sizeLimits: MARIADB_SIZE_LIMITS, varchar: 'VARCHAR', signWords: true,
   names: { name: mariadbName, own: ['pk', 'unique'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema' }, max: 64 },
   autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, enumCheck: false,
   keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
@@ -512,13 +543,13 @@ const pgDeferred = (order, how) => laterKeys(order, DIALECTS.postgres).map(({ t,
 const DIALECTS = {
   mariadb: MARIADB,
   mysql: {
-    ...MARIADB, name: 'MySQL', q: quoter(MYSQL_RESERVED, '`'), problems: mysqlProblems,
+    ...MARIADB, name: 'MySQL', q: quoter(MYSQL_RESERVED, '`'), problems: mysqlProblems, native: MYSQL_NATIVE, unkeyable: MYSQL_UNKEYABLE,
     // a default other than a plain value, or on TEXT, BLOB or JSON, is an expression in parentheses
     defaultFor: (c, v) => v === 'CURRENT_DATE' || isLobType(c.effType) ? `(${v})` : v,
   },
   sqlite: {
     ...COMMON, name: 'SQLite', q: quoter(SQLITE_KEYWORDS, '"'), types: SQLITE_TYPES, varchar: 'VARCHAR',
-    keepType: t => /^(enum|set)\(/.test(t) ? 'TEXT' : null, names: givenNames(Infinity, 'table'),
+    native: SQLITE_NATIVE, names: givenNames(Infinity, 'table'),
     autoSQL: ' PRIMARY KEY AUTOINCREMENT', numberingIsKey: true, fkInline: true, // tables may point to tables made later
     keysAtStart: cyclic => [cyclic ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;'], keysOn: 'PRAGMA foreign_keys = ON;',
     problems: tables => keyProblems(tables, 'SQLite'), // SQLite doesn't compare the types
@@ -526,7 +557,7 @@ const DIALECTS = {
   },
   postgres: {
     ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"', '"', true), schema: 'public', maxName: 63,
-    types: PG_TYPES, keepType: t => PG_KEPT[typeParts(t).base], varchar: 'VARCHAR', signless: true,
+    types: PG_TYPES, native: PG_NATIVE, varchar: 'VARCHAR', unkeyable: ['json', 'point', 'polygon', 'xml'],
     names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema' }, max: 63, exact: true },
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', dropTail: 'CASCADE', problems: postgresProblems,
     bool: (b, c) => c && /^bit\b/.test(c.effType) ? `B'${b ? 1 : 0}'` : upperBool(b),
@@ -540,7 +571,8 @@ const DIALECTS = {
   },
   mssql: {
     ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', maxName: 128, nPrefix: true,
-    types: MSSQL_TYPES, keepType: mssqlKeptType, varchar: 'NVARCHAR', signless: true, names: givenNames(128, 'schema'),
+    types: MSSQL_TYPES, native: ['geometry', 'money', 'xml', 'rowversion'], sizeLimits: MSSQL_SIZE_LIMITS, varchar: 'NVARCHAR',
+    unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema'),
     autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
     dropKey: (T, name) => `IF OBJECT_ID(N'${T}', N'U') IS NOT NULL ALTER TABLE ${T} DROP CONSTRAINT IF EXISTS ${name};`,
     str: s => 'N' + sqlStr(s), bool: b => b ? '1' : '0', today: 'CAST(GETDATE() AS DATE)',

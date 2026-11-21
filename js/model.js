@@ -36,7 +36,8 @@ const stripComment = line => { const i = commentAt(line); return i < 0 ? line : 
 // Applies f to a type outside its 'quoted' values, so enum('Small','Large') keeps its case
 const outsideQuotes = (t, f) => t.replace(/'(?:[^']|'')*'?|[^']+/g, m => m[0] === "'" ? m : f(m));
 
-// Canonical short form of a type: "VARCHAR(128)" → "vc", "varchar(50)" → "vc(50)", "INT(11)" → "int"
+// Canonical short form of a type, as jaidb's text has it: "VARCHAR(128)" → "vc", "varchar(50)" → "vc(50)", "INT(11)" → "int",
+// and one name for the types written two ways: dec, fixed and numeric are decimal, boolean is bool, double precision double
 function normType(t) {
   if (!t) return null;
   let s = outsideQuotes(t, s => s.toLowerCase()).replace(/\s+/g, ' ').replace(/\s*\(\s*/g, '(').replace(/\s*,\s*/g, ',').replace(/\s*\)/g, ')').trim();
@@ -45,7 +46,8 @@ function normType(t) {
     const n = m[1] ? +m[1] : DEFAULT_VC;
     return (n === DEFAULT_VC ? 'vc' : `vc(${n})`) + m[2];
   }
-  return s.replace(/^integer\b/, 'int').replace(/^(tinyint|smallint|mediumint|int|bigint)\(\d+\)/, '$1');
+  return s.replace(/^integer\b/, 'int').replace(/^(dec|fixed|numeric)\b/, 'decimal').replace(/^boolean\b/, 'bool')
+    .replace(/^double precision\b/, 'double').replace(/^(tinyint|smallint|mediumint|int|bigint)\(\d+\)/, '$1');
 }
 
 // A type as its parts: "decimal(8,2) unsigned" → { base: 'decimal', args: '8,2', rest: ' unsigned', unsigned: true }

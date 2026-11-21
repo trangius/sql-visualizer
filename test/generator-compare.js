@@ -208,7 +208,7 @@ function model(sql) {
 
 // What sql_visualizer writes that jaidb has no part in
 const PREAMBLE = /^(DROP TABLE|SET FOREIGN_KEY_CHECKS|PRAGMA|IF OBJECT_ID\(.*DROP CONSTRAINT)|^CREATE INDEX /;
-const svScript = sql => statements(sql).filter(s => !PREAMBLE.test(s)).map(s => s.replace(/, INDEX \S+ \([^)]*\)/g, '')).join(';\n') + ';\n';
+const svScript = sql => statements(sql).filter(s => !PREAMBLE.test(s)).map(s => s.replace(/, INDEX \S+ \([^)]*\)/g, '').replace(/ CHECK \(\S+ IN \((?:'(?:[^']|'')*'|[ ,])*\)\)/g, '')).join(';\n') + ';\n';
 
 // ─── The comparison ──────────────────────────────────────────────────────────
 
