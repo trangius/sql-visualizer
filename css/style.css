@@ -539,6 +539,26 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   display: flex; flex-direction: column; gap: 8px; pointer-events: none;
 }
 .canvas-msgs > * { pointer-events: auto; }
+/* Until the app has started: nothing on the page works yet, so nothing can be clicked or typed */
+#loading {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  opacity: 0; animation: loading-in .2s .3s forwards; /* a fast start never shows it */
+}
+#loading[hidden] { display: none; }
+/* nothing in it waits for another download: on a slow connection it shows complete */
+.loading-card {
+  display: flex; align-items: center; gap: 12px; padding: 16px 22px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  color: var(--muted); font-size: 14px;
+}
+.loading-spin {
+  width: 16px; height: 16px; flex: none; border-radius: 50%;
+  border: 2px solid var(--line2); border-top-color: var(--accent); animation: loading-spin .8s linear infinite;
+}
+@keyframes loading-in { to { opacity: 1; } }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .loading-spin { animation-duration: 2.4s; } }
 #toast {
   align-self: center; flex: none; margin-bottom: 4px;
   height: 36px; padding: 0 6px 0 14px; border-radius: 9px; background: var(--toast); color: var(--toast-fg);

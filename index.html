@@ -24,6 +24,10 @@
 </script>
 </head>
 <body>
+<!-- covers the page until the app has started (hidden by app.js); shows itself only if that takes a moment -->
+<div id="loading" role="status">
+  <div class="loading-card"><span class="loading-spin" aria-hidden="true"></span><span>Loading SQL Visualizer…</span></div>
+</div>
 <header class="appbar">
   <div class="brand">
     <img id="logo" class="logo" alt="SQL Visualizer" title="SQL Visualizer" width="32" height="32">
@@ -174,7 +178,7 @@
       <div class="gutter" id="gutter"></div>
       <div class="code">
         <pre id="hl" aria-hidden="true"></pre>
-        <textarea id="src" spellcheck="false" wrap="off" autocapitalize="off" autocomplete="off" aria-label="Diagram source"></textarea>
+        <textarea id="src" readonly spellcheck="false" wrap="off" autocapitalize="off" autocomplete="off" aria-label="Diagram source"></textarea>
       </div>
 
       <div id="help" hidden>

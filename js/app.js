@@ -203,7 +203,6 @@ ta.addEventListener('input', () => {
   histTyping();
   if (state.mode === 'text') { state.text = ta.value; state.sqlStale = true; }
   else { state.sql = ta.value; state.textStale = true; }
-  if (!started) { saveState(); return; } // typed while the fonts load: drawn at the start
   update();
   if (pastedAll) { pastedAll = false; posBeforeData = null; autoLayout(); fit(); }
   saveState();
@@ -444,7 +443,8 @@ function setMode(mode) {
 }
 
 // The text goes into the editor as soon as the scripts have run; only drawing waits for the
-// fonts. An editor left empty until then would save a keystroke as the whole diagram.
+// fonts. Until the start the editor is read-only (in index.html) and #loading covers the page:
+// a key typed before the scripts were there would only be thrown away.
 function fillEditor() {
   const text = state.mode === 'text' ? state.text : state.sql;
   if (ta.value !== text) { ta.value = text; ta.scrollTop = 0; }
@@ -904,6 +904,8 @@ Promise.all([scriptsRun, Promise.race([fontsLoaded, new Promise(r => setTimeout(
   if (boxesOverlap()) autoLayout(); // saved positions from different box sizes
   if (docView) { Object.assign(view, docView); applyView(); } else fit();
   started = true;
+  ta.readOnly = outdated;
+  $('#loading').hidden = true;
 });
 // fonts that arrive late: measure again, and tidy up if the wider boxes now collide.
 // (Fonts that are on time get here first: the start above then draws with them. Drawing the
