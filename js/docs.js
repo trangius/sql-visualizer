@@ -94,11 +94,11 @@ function uniqueName(base) {
   return `${base} ${n}`;
 }
 
-// Open a new diagram in a tab right after the current one
-function newDoc(name, text, fields = {}) {
+// Open a new diagram in a tab right after the current one, or at the end (the + button, as in browsers)
+function newDoc(name, text, fields = {}, atEnd = false) {
   const id = newDocId();
   persist(docKey(id), { ...DOC_DEFAULTS, text, base: text, pos: {}, ...fields });
-  const i = docs.list.findIndex(d => d.id === docs.active);
+  const i = atEnd ? docs.list.length - 1 : docs.list.findIndex(d => d.id === docs.active);
   docs.list.splice(i + 1, 0, { id, name: uniqueName(name) });
   switchDoc(id);
   showStorageNotice();
@@ -196,7 +196,7 @@ tabsEl.addEventListener('keydown', e => { // arrow keys move between tabs
   if (next) { e.preventDefault(); switchDoc(next.id); $('#tabs .tab.on').focus(); }
   if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); renameDoc(tab); }
 });
-$('#newTabBtn').onclick = () => newDoc('Untitled', '');
+$('#newTabBtn').onclick = () => newDoc('Untitled', '', {}, true);
 
 // Fields for a new tab holding `src`: SQL opens in the SQL view, anything else in the simple one
 const docFields = (src, sql) => sql
