@@ -539,19 +539,22 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   display: flex; flex-direction: column; gap: 8px; pointer-events: none;
 }
 .canvas-msgs > * { pointer-events: auto; }
-/* Until the app has started: nothing on the page works yet, so nothing can be clicked or typed */
-#loading {
-  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+/* A card over the whole page, when nothing on it may be used: until the app has started
+   (#loading), or when the tab is out of date (#outdatedNotice). Nothing in it waits for
+   another download, so a slow connection shows it complete. */
+.cover {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
-  opacity: 0; animation: loading-in .2s .3s forwards; /* a fast start never shows it */
 }
-#loading[hidden] { display: none; }
-/* nothing in it waits for another download: on a slow connection it shows complete */
-.loading-card {
-  display: flex; align-items: center; gap: 12px; padding: 16px 22px;
+.cover[hidden] { display: none; }
+.cover-card {
+  display: flex; align-items: center; gap: 12px; max-width: 420px; padding: 16px 22px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
-  color: var(--muted); font-size: 14px;
+  color: var(--muted); font-size: 14px; line-height: 1.5;
 }
+#loading { opacity: 0; animation: loading-in .2s .3s forwards; } /* a fast start never shows it */
+#outdatedNotice .cover-card { flex-direction: column; align-items: stretch; gap: 16px; padding: 20px 22px 18px; color: var(--fg); }
+#outdatedReload { align-self: flex-end; }
 .loading-spin {
   width: 16px; height: 16px; flex: none; border-radius: 50%;
   border: 2px solid var(--line2); border-top-color: var(--accent); animation: loading-spin .8s linear infinite;

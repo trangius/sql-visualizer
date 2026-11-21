@@ -22,7 +22,8 @@ function shareText() {
 }
 
 async function shareLink() {
-  const d = { n: activeDoc().name, m: 'text', s: shareText(), ...(state.dialect !== 'mariadb' && { dl: state.dialect }) };
+  // f: the data format (FORMAT, app.js) the link was made in; links from before it have none (2)
+  const d = { n: activeDoc().name, m: 'text', s: shareText(), ...(state.dialect !== 'mariadb' && { dl: state.dialect }), f: FORMAT };
   const z = await squeeze(new TextEncoder().encode(JSON.stringify(d)), new CompressionStream('deflate-raw'));
   return location.href.split('#')[0] + '#d=' + b64url(z);
 }
@@ -46,6 +47,8 @@ async function openShared() {
     const raw = await squeeze(unb64url(m[1]), new DecompressionStream('deflate-raw'));
     const d = JSON.parse(new TextDecoder().decode(raw));
     if (typeof d?.s !== 'string') throw new Error('no schema in the link');
+    // A change to what a link holds raises FORMAT; older links are read here by their f.
+    if ((d.f ?? 2) > FORMAT) { becomeOutdated(); return; }
     const dialect = DIALECTS[d.dl] ? { dialect: d.dl } : {};
     newDoc(typeof d.n === 'string' && d.n || 'Shared', d.s, { ...docFields(d.s, d.m === 'sql'), ...dialect }); // no positions: auto layout, then fit
   } catch {

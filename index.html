@@ -25,8 +25,12 @@
 </head>
 <body>
 <!-- covers the page until the app has started (hidden by app.js); shows itself only if that takes a moment -->
-<div id="loading" role="status">
-  <div class="loading-card"><span class="loading-spin" aria-hidden="true"></span><span>Loading SQL Visualizer…</span></div>
+<div id="loading" class="cover" role="status">
+  <div class="cover-card"><span class="loading-spin" aria-hidden="true"></span><span>Loading SQL Visualizer…</span></div>
+</div>
+<!-- shown by becomeOutdated (app.js): this tab must not be used any more -->
+<div id="outdatedNotice" class="cover" role="alert" hidden>
+  <div class="cover-card"><span id="outdatedText"></span><button id="outdatedReload" class="btn-primary">Reload</button></div>
 </div>
 <header class="appbar">
   <div class="brand">
@@ -349,10 +353,6 @@
 
     <!-- the messages at the bottom of the canvas, in one column: a toast stands above a notice -->
     <div class="canvas-msgs">
-      <div id="outdatedNotice" class="notice" role="alert" hidden>
-        <span id="outdatedText"></span>
-        <button id="outdatedReload" class="btn-outline">Reload</button>
-      </div>
       <div id="toast" hidden><span id="toastMsg"></span><button id="toastAct"></button></div>
 
       <div id="selectHint" class="notice" role="status" hidden>
@@ -417,6 +417,7 @@
     <h2 id="cfTitle"></h2>
     <p id="cfBody"></p>
     <div class="dlg-actions">
+      <button id="cfOther" class="btn-outline" hidden></button>
       <span class="spacer"></span>
       <button id="cfOk" class="btn-outline danger"></button>
       <button id="cfCancel" class="btn-primary"></button>

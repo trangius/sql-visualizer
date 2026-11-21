@@ -233,22 +233,26 @@ document.addEventListener('drop', e => {
 
 // A small confirmation dialog. Resolves true for the OK button; Cancel (the default), Esc
 // or clicking outside resolve false.
-function confirmBox({ title, body, ok, cancel }) {
+// Resolves true (ok), false (cancel) or, given a third choice (other), 'other'.
+function confirmBox({ title, body, ok, cancel, other }) {
   const dlgBox = $('#confirmDlg');
   $('#cfTitle').textContent = title;
   $('#cfBody').innerHTML = body;
   $('#cfOk').textContent = ok;
   $('#cfCancel').textContent = cancel;
+  $('#cfOther').textContent = other ?? '';
+  $('#cfOther').hidden = !other;
   dlgBox.hidden = false;
   $('#cfCancel').focus();
   return new Promise(resolve => {
     const done = answer => {
       dlgBox.hidden = true;
-      dlgBox.onkeydown = dlgBox.onpointerdown = $('#cfOk').onclick = $('#cfCancel').onclick = null;
+      dlgBox.onkeydown = dlgBox.onpointerdown = $('#cfOk').onclick = $('#cfCancel').onclick = $('#cfOther').onclick = null;
       resolve(answer);
     };
     $('#cfOk').onclick = () => done(true);
     $('#cfCancel').onclick = () => done(false);
+    $('#cfOther').onclick = () => done('other');
     dlgBox.onkeydown = e => { if (e.key === 'Escape') { e.stopPropagation(); done(false); } };
     dlgBox.onpointerdown = e => { if (e.target === dlgBox) done(false); };
   });

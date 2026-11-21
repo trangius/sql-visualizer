@@ -231,7 +231,8 @@ const docNameFrom = text => (text.match(/^#\s*(.+)$/m)?.[1].trim().slice(0, 40))
 // What is stored has a format number, kept under 'format'. A change to its shape raises
 // FORMAT and adds the step that brings the format before it up to the new one: STORAGE_STEPS
 // for the keys, DOC_STEPS for one diagram's data, which also arrives saved online by an older
-// version. Each format has test/fixtures/format-<n>.json, what it looked like; the site's
+// version; share links carry their format too (share.js). Each format has
+// test/fixtures/format-<n>.json, what it looked like; the site's
 // tests load every one into the current app. A window that finds a newer format than its own
 // stops writing: see becomeOutdated.
 //   1  one diagram, under 'state' and 'pos'
