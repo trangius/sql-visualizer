@@ -2,7 +2,7 @@
 
 A browser tool for drawing SQL table diagrams. Arrows connect foreign-key columns directly to the columns they reference, making relationships and JOINs easy to follow.
 
-[Open SQL Visualizer](https://trangius.se/sql_visualizer/)
+[Open SQL Visualizer](https://sql-visualizer.com/)
 
 ![SQL Visualizer](docs/screenshots/light.png)
 
