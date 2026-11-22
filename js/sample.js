@@ -427,6 +427,9 @@ function dedupe(t, rows) {
   }
 }
 
+// Whether row o is the one row r's foreign key c points to: with every value of c's group (fkCols)
+const pointedBy = (c, r) => { const { cols, targetCols } = fkCols(c); return o => cols.every((f, k) => o.values.get(targetCols[k]) === r.values.get(f)); };
+
 // A junction table (its key is all foreign keys) gets more rows, so the many-to-many shows
 const isJunction = t => t.pkCols.length > 1 && t.pkCols.every(c => c.ref || c.implicit);
 
@@ -523,19 +526,21 @@ function sampleData(tables, n = SAMPLE_ROWS) {
     rows.forEach((r, i) => {
       for (let attempt = 0; attempt < 16; attempt++) {
         for (const c of t.cols) {
-          if (!c.target) continue;
-          const key = `${t.name}.${c.name}.${i}.${attempt}`;
-          let pool = data.get(c.target).map(o => o.values.get(c.targetCol)).filter(v => v != null);
-          if (c.target === t) pool = pool.filter(v => v !== r.values.get(c.targetCol)); // not itself
-          const none = !pool.length || (c.nullable && rand(key + 'null') < 0.2);
-          r.values.set(c, none ? null : pool[Math.floor(pool.length * rand(key) ** 1.6)]);
+          if (!c.target || !leadsFk(c)) continue;
+          // the arrows that are one key together (c.fkGroup) take their values from one row: a pair that exists
+          const key = `${t.name}.${c.name}.${i}.${attempt}`, { cols, targetCols } = fkCols(c);
+          let pool = data.get(c.target).filter(o => targetCols.every(tc => o.values.get(tc) != null));
+          if (c.target === t) pool = pool.filter(o => targetCols.some(tc => o.values.get(tc) !== r.values.get(tc))); // not itself
+          const none = !pool.length || (cols.every(f => f.nullable) && rand(key + 'null') < 0.2);
+          const o = none ? null : pool[Math.floor(pool.length * rand(key) ** 1.6)];
+          cols.forEach((f, k) => r.values.set(f, o ? o.values.get(targetCols[k]) : null));
         }
         const keys = sets.map(s => tupleKey(r, s));
         const bad = t.cols.some(c => c.target && !c.nullable && r.values.get(c) == null);
         if (!bad && keys.every((k, j) => k == null || !seen[j].has(k))) {
           keys.forEach((k, j) => k != null && seen[j].add(k));
           for (const [c, fk, from] of copies) {
-            const o = data.get(fk.target).find(o => o.values.get(fk.targetCol) === r.values.get(fk));
+            const o = data.get(fk.target).find(pointedBy(fk, r));
             if (o?.values.get(from) != null) r.values.set(c, fitValue(+o.values.get(from), typeInfo(c), ''));
           }
           if (copies.length && qty && r.values.get(qty) != null) {

@@ -74,7 +74,8 @@ function keyHues(tables) {
   for (const t of tables) {
     for (const c of t.cols) {
       if (c.target) {
-        const tc = c.targetCol, key = partKeyHue(c.target, tc);
+        // the arrows that are one key together (c.fkGroup) all get that key's
+        const tc = c.targetCol, g = c.fkGroup, key = g ? keyGroups(g.target).find(k => k.cols === g.targetCols)?.hue : partKeyHue(c.target, tc);
         if (key == null && !colHue.has(tc)) colHue.set(tc, next());
         c.keyHue = key ?? colHue.get(tc);
       } else c.keyHue = c.isPk ? t.hue : null;
@@ -110,12 +111,16 @@ const KEY_SYMBOLS = [
 const keyDot = (g, k, j, y) =>
   `<path class="kdot" style="--h:${g.hue}" transform="translate(${dotX(j)},${y})" fill-rule="evenodd" d="${KEY_SYMBOLS[k % KEY_SYMBOLS.length]}"/>`;
 
-// Keys and indexes over several columns are listed below the rows: "unique (Name, Credits)"
+// Keys, foreign keys and indexes over several columns are listed below the rows: "unique (Name, Credits)",
+// "fk (OrderId, VariantId) -> ProductToOrder"
 const FOOT_H = 22;
-// { label, text, cols, group }: group is the key's dot column, null for an index
+// { label, text, cols, group, hue }: group is the key's dot column, null for a foreign key or an index;
+// hue the label's colour: a key's own, a foreign key's that of the key it points to (its FK badges')
 const footLines = t => [
-  ...keyGroups(t).map((g, k) => ({ label: g.label, text: `(${g.cols.map(c => c.name).join(', ')})`, cols: g.cols.map(c => c.name), group: k })),
-  ...(t.multiIndexes ?? []).map(ix => ({ label: 'index', text: `(${ix.cols.join(', ')})`, cols: ix.cols, group: null })),
+  ...keyGroups(t).map((g, k) => ({ label: g.label, text: `(${g.cols.map(c => c.name).join(', ')})`, cols: g.cols.map(c => c.name), group: k, hue: g.hue })),
+  ...(t.fkGroups ?? []).map(g => ({ label: 'fk', text: `(${g.cols.map(c => c.name).join(', ')}) -> ${g.target.name}`, cols: g.cols.map(c => c.name),
+    group: null, hue: g.cols[0].keyHue })),
+  ...(t.multiIndexes ?? []).map(ix => ({ label: 'index', text: `(${ix.cols.join(', ')})`, cols: ix.cols, group: null, hue: null })),
 ];
 const footLabelW = foot => Math.max(0, ...foot.map(f => textW(f.label + ' ', FONTS.flags)));
 const footTop = n => ROWS_TOP + Math.max(1, n) * ROW_H + 6;
@@ -153,7 +158,7 @@ function measureData(t) {
   const cells = rows.map((r, k) => cols.map(c => {
     const v = r.values.get(c), cell = { text: cellText(v) };
     if (c.target && v != null) {
-      const j = data.get(c.target).findIndex(o => o.values.get(c.targetCol) === v);
+      const j = data.get(c.target).findIndex(pointedBy(c, r)); // with all of a group's values
       if (j >= 0) cell.key = `${c.target.name}#${j}`;
     } else if (targeted.has(c)) cell.key = `${t.name}#${k}`;
     if (cell.key) cell.hue = hues.get(cell.key) ?? 0;
@@ -1376,7 +1381,7 @@ function boxMarkup(t, b, interactive) {
     if (interactive) s += `<rect class="hit" x="1" y="${y - FOOT_H / 2}" width="${w - 2}" height="${FOOT_H}"/>`;
     if (f.group != null) s += keyDot(groups[f.group], f.group, slots - 1, y);
     const lx = f.group != null ? nx : PAD_X;
-    s += `<text class="flags"${f.group != null ? ` style="fill:oklch(var(--key-l, .55) var(--key-c, .15) ${groups[f.group].hue})"` : ''} x="${lx}" y="${y}">${f.label}</text>` +
+    s += `<text class="flags"${f.hue != null ? ` style="fill:oklch(var(--key-l, .55) var(--key-c, .15) ${f.hue})"` : ''} x="${lx}" y="${y}">${f.label}</text>` +
       `<text class="type" x="${lx + labelW}" y="${y}">${esc(f.text)}</text></g>`;
   });
   s += `<rect class="outline" x=".5" y=".5" width="${w - 1}" height="${h - 1}" rx="${r - .5}"/></g>`;

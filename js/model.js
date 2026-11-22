@@ -301,6 +301,44 @@ function implicitTarget(c, lower) {
 
 const colNamed = (t, n) => t.cols.find(c => c.name.toLowerCase() === n.toLowerCase());
 
+// Arrows that together point at a key over several columns are one foreign key: in t, the arrows to a
+// table whose targets are the columns of its pk (…) or of one of its unique (…), in that order. Key column
+// by key column, the first of t's columns (in t's order) not yet in a group whose arrow points at it; when
+// every key column has one, they are a group, and the next arrows to the key make the next (FromName and
+// FromCountry, then ToName and ToCountry, to City's pk (Name, Country)). t.fkGroups: [{ cols, target,
+// targetCols, lead }] in the key's order (targetCols is the key's own list: t.pkCols or a unique's cols;
+// lead the first of them in t), and c.fkGroup on each of them. An arrow left over stays a foreign key of its own.
+function findFkGroups(t, problems) {
+  t.fkGroups = [];
+  for (const c of t.cols) c.fkGroup = null;
+  const arrows = t.cols.filter(c => c.target && !c.implicit);
+  for (const tt of new Set(arrows.map(c => c.target))) {
+    for (const key of [...(tt.pkCols.length > 1 ? [tt.pkCols] : []), ...tt.multiUniques.map(u => u.cols)]) for (;;) {
+      const cols = [];
+      for (const k of key) {
+        const c = arrows.find(c => c.target === tt && c.targetCol === k && !c.fkGroup && !cols.includes(c));
+        if (!c) break;
+        cols.push(c);
+      }
+      if (cols.length < key.length) break;
+      const g = { cols, target: tt, targetCols: key, lead: t.cols.find(c => cols.includes(c)) };
+      for (const c of g.cols) c.fkGroup = g;
+      t.fkGroups.push(g);
+      // one key does one thing when the row it points to goes or changes
+      const differ = [['delete', 'onDelete'], ['update', 'onUpdate']].filter(([, on]) => new Set(g.cols.map(c => c[on])).size > 1);
+      if (!differ.length) continue;
+      const names = g.cols.map(c => c.name), what = differ.map(([w]) => `[${w} …]`).join(' and ');
+      const msg = `${names.slice(0, -1).join(', ')} and ${names.at(-1)} point at ${tt.name} (${key.map(c => c.name).join(', ')}) ` +
+        `together, as one foreign key: write the same ${what} on ${names.length > 2 ? 'all of them' : 'both'}`;
+      for (const c of g.cols) problems.push(problem(c.line, msg));
+    }
+  }
+}
+// The columns of the foreign key an arrow is part of, and those they point to: its group's, or its own.
+// A group is one foreign key, written (and given its sample values) at its first column in the table: leadsFk.
+const fkCols = c => c.fkGroup ?? { cols: [c], targetCols: [c.targetCol] };
+const leadsFk = c => !c.fkGroup || c.fkGroup.lead === c;
+
 function resolve(tables, implicit = false) {
   const problems = [];
   const exact = new Map(tables.map(t => [t.name, t]));
@@ -374,6 +412,7 @@ function resolve(tables, implicit = false) {
       }
     }
   }
+  for (const t of tables) findFkGroups(t, problems);
   for (const t of tables) {
     for (const c of t.cols) {
       c.effType = effType(c);
@@ -431,9 +470,9 @@ function genText(tables, notes) {
     for (const n of notes) out.push(`#   ${n.msg}`);
     out.push('');
   }
-  // MariaDB's script gives a column a foreign key points to an index of its own, unless a key starts with it:
-  // read back, that index goes without saying
-  const pointedTo = new Set(tables.flatMap(t => t.cols.filter(c => c.target).map(c => c.targetCol)));
+  // MariaDB's script gives a column a foreign key points to an index of its own, unless a key starts with it
+  // (or the key is over several columns, c.fkGroup): read back, that index goes without saying
+  const pointedTo = new Set(tables.flatMap(t => t.cols.filter(c => c.target && !c.fkGroup).map(c => c.targetCol)));
   const implied = (t, c) => pointedTo.has(c) && !c.unique && t.pkCols[0] !== c && !t.multiUniques.some(u => u.cols[0] === c) &&
     !t.multiIndexes.some(ix => ix.cols[0] === c.name);
   tables.forEach((t, i) => {

@@ -177,8 +177,9 @@ const defaultSQL = (c, D) => {
 // The actions the database writes; NO ACTION goes without saying, and RESTRICT where it is the same (D.noActions)
 const fkActionsSQL = (c, D) => [['DELETE', c.onDelete], ['UPDATE', c.onUpdate]]
   .map(([on, a]) => a && !D.noActions.includes(a) ? ` ON ${on} ${a.toUpperCase()}` : '').join('');
-const fkSQL = (c, D, named = '') =>
-  `${named}FOREIGN KEY (${D.q(c.name)}) REFERENCES ${tableSQL(D, c.target.name)}(${D.q(c.targetCol.name)})` + fkActionsSQL(c, D);
+// FOREIGN KEY over an arrow's column, or over the arrows that are one key together (fkCols)
+const fkSQL = (c, D, named = '') => { const { cols, targetCols } = fkCols(c);
+  return `${named}FOREIGN KEY (${keyList(cols, D.q)}) REFERENCES ${tableSQL(D, c.target.name)}(${keyList(targetCols, D.q)})` + fkActionsSQL(c, D); };
 const keyList = (cols, Q) => cols.map(c => Q(c.name)).join(', ');
 const column = (c, w, Q, type, rest) => `  ${Q(c.name).padEnd(w)} ${type}${rest}`;
 const nullSQL = c => c.nullable ? ' NULL' : ' NOT NULL';
@@ -198,8 +199,10 @@ const createIndexes = (t, taken, D) => namedIndexes(t, taken, D).map(ix =>
   `CREATE INDEX ${D.q(ix.name)} ON ${tableSQL(D, t.name)} (${ix.cols.map(D.q).join(', ')});`);
 
 const tablesOf = tables => topoOrder(tables.filter(t => t.cols.length));
-const isKey = c => pointsToPk(c) || c.targetCol.unique;
+// an arrow to the primary key or a unique column, or one of the arrows to a key over several columns
+const isKey = c => pointsToPk(c) || c.targetCol.unique || !!c.fkGroup;
 const links = tables => tables.flatMap(t => t.cols.filter(c => c.target && !c.implicit).map(c => ({ t, c })));
+const foreignKeys = tables => links(tables).filter(({ c }) => leadsFk(c)); // the arrows of a group as one
 
 // ─── What the databases refuse ───────────────────────────────────────────────
 
@@ -319,7 +322,8 @@ function constraintNames(order, D) {
   const pointedTo = new Set(order.flatMap(t => t.cols.filter(c => c.target).map(c => c.targetCol)));
   // where D.nullUniqueIndex, a unique key that may be null is a unique index of the rows where it isn't:
   // SQL Server's UNIQUE allows one NULL only. An FK may only point to a constraint, so one pointed to stays one.
-  const isIndex = cols => D.nullUniqueIndex && cols.some(c => c.nullable) && !(cols.length === 1 && pointedTo.has(cols[0]));
+  const groupedTo = new Set(order.flatMap(t => t.fkGroups.map(g => g.targetCols)));
+  const isIndex = cols => D.nullUniqueIndex && cols.some(c => c.nullable) && !(cols.length === 1 && pointedTo.has(cols[0])) && !groupedTo.has(cols);
   const created = new Set();
   for (const t of order) {
     created.add(t);
@@ -332,7 +336,8 @@ function constraintNames(order, D) {
     }
     const pk = t.pkCols.length && !rowid ? take('pk', t.name) : null;
     for (const u of t.multiUniques) (isIndex(u.cols) ? indexes : multi).push({ cols: u.cols, ...take('unique', t.name, u.cols.map(c => c.name).join('_')) });
-    const fks = t.cols.filter(c => c.target).map(c => ({ c, later: !created.has(c.target) && !D.fkInline, ...take('fk', t.name, c.name) }));
+    const fks = t.cols.filter(c => c.target && leadsFk(c)).map(c =>
+      ({ c, later: !created.has(c.target) && !D.fkInline, ...take('fk', t.name, fkCols(c).cols.map(c => c.name).join('_')) }));
     names.set(t, { rowid, unique, indexes, pk, multi, fks });
   }
   return names;
@@ -351,7 +356,8 @@ function inlineIndexes(t, tables, D) {
   // names MariaDB gives the indexes it makes itself: a UNIQUE or FOREIGN KEY one is named after its first column
   const taken = new Set(['primary', ...t.cols.filter(c => c.unique || c.target).map(c => c.name.toLowerCase()),
     ...t.multiUniques.map(u => u.cols[0].name.toLowerCase())]);
-  const pointedTo = new Set(tables.flatMap(o => o.cols.filter(c => c.target === t).map(c => c.targetCol)));
+  // a key over several columns the arrows of a group point to is that index already
+  const pointedTo = new Set(tables.flatMap(o => o.cols.filter(c => c.target === t && !c.fkGroup).map(c => c.targetCol)));
   const needed = t.cols.filter(c => pointedTo.has(c) && !hasIndex(t, c))
     .map(c => ({ name: shortName(indexName(t.name, [c.name]), D.maxName), cols: [c.name] }));
   for (const ix of needed) taken.add(ix.name.toLowerCase());
@@ -444,7 +450,7 @@ function mssqlProblems(tables) {
   }
   // "may cause cycles or multiple cascade paths": what a delete (or key update) starts may reach each table only once
   for (const action of ['onDelete', 'onUpdate']) {
-    const children = t => links(tables).filter(({ c }) => c.target === t && /^(cascade|set null)$/.test(c[action] ?? ''));
+    const children = t => foreignKeys(tables).filter(({ c }) => c.target === t && /^(cascade|set null)$/.test(c[action] ?? ''));
     const bad = new Map(); // column → its table
     for (const start of tables) {
       const seen = new Set([start]), walk = t => {

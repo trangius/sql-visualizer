@@ -216,6 +216,16 @@ for (const notation of ['arrows', 'uml', 'ratio', 'crowsfoot']) {
     for (const name of ['rental', 'shop', 'store']) sound(corpus.find(s => s.name === name).text, { notation, keysOnly, measured: true }, `${name} as ${notation}`);
   }
 }
+// Arrows that are one foreign key over a key's columns get a line under their table, "fk (A, B) -> T", which the box
+// makes room for: here two, to one key
+{
+  const text = 'City\n  Name\n  Country\n  pk (Name, Country)\nRoute\n  Id\n  FromName -> City.Name\n  ToName -> City.Name\n' +
+    '  FromCountry -> City.Country\n  ToCountry -> City.Country\n';
+  for (const notation of ['arrows', 'crowsfoot']) sound(text, { notation, measured: true }, `fks over a key as ${notation}`);
+  const route = model(text).find(t => t.name === 'Route'), groups = route.fkGroups, size = n => { route.fkGroups = groups.slice(0, n); return api.measureTable(route); };
+  const [none, one, two] = [0, 1, 2].map(size);
+  assert(groups.length === 2 && one.w > none.w && two.h > one.h && one.h > none.h, 'fks over a key: their lines have no room in the box');
+}
 // Random schemas, as the boxes of the tests and as the page measures them
 for (let seed = 1; seed <= FUZZ; seed++) {
   for (const options of [{}, { measured: true }, { measured: true, notation: 'crowsfoot' }, { measured: true, keysOnly: true, aspect: 0.8 }, { aspect: 2.25, notation: 'uml' }]) {

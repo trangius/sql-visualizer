@@ -168,7 +168,7 @@ function parseSQL(src, dialect = 'mariadb') {
       warn(line, `Statement starting with "${st[0].v}" ignored`);
     }
   }
-  return { tables: accs.map(a => finalizeTable(a, warn, error, dialect)), problems };
+  return { tables: accs.map(a => finalizeTable(a, warn, error, dialect, findAcc)), problems };
 }
 
 function parseDef(p, acc, warn, error) {
@@ -346,7 +346,7 @@ function readType(t, dialect) {
   return hit ? s.replace(hit[0], hit[1]) : t;
 }
 
-function finalizeTable(acc, warn, error, dialect) {
+function finalizeTable(acc, warn, error, dialect, findAcc) {
   const lc = n => n.toLowerCase();
   const pkNames = acc.pk ? acc.pk.cols : acc.cols.filter(c => c.pk).map(c => c.name);
   const pkSet = new Set(pkNames.map(lc));
@@ -372,14 +372,23 @@ function finalizeTable(acc, warn, error, dialect) {
   }));
   const find = n => cols.find(c => lc(c.name) === lc(n));
 
+  // A foreign key over several columns is an arrow from each to its column (resolve() makes them one key
+  // again); without a column list, to the columns of the table's primary key
   for (const fk of acc.fks) {
-    if (fk.cols.length !== 1) { error(fk.line, `Composite foreign key (${fk.cols.join(', ')}) can't be drawn as one arrow`); continue; }
-    const col = find(fk.cols[0]);
-    if (!col) { error(fk.line, `Foreign key column ${fk.cols[0]} does not exist in ${acc.name}`); continue; }
-    col.ref = fk.rt;
-    col.refCol = fk.rcols[0] ?? null; // genText writes just "-> Table" when this is the table's primary key
-    col.onDelete = fk.onDelete ?? null;
-    col.onUpdate = fk.onUpdate ?? null;
+    const target = fk.cols.length > 1 && !fk.rcols.length && fk.rt ? findAcc(fk.rt) : null;
+    const rcols = target ? target.pk?.cols ?? target.cols.filter(c => c.pk).map(c => c.name) : fk.rcols;
+    if (fk.cols.length > 1 && rcols.length && rcols.length !== fk.cols.length) {
+      error(fk.line, `The foreign key (${fk.cols.join(', ')}) points at ${rcols.length} column${rcols.length === 1 ? '' : 's'} of ${fk.rt}`);
+      continue;
+    }
+    fk.cols.forEach((n, i) => {
+      const col = find(n);
+      if (!col) { error(fk.line, `Foreign key column ${n} does not exist in ${acc.name}`); return; }
+      col.ref = fk.rt;
+      col.refCol = rcols[i] ?? null; // genText writes just "-> Table" when this is the table's primary key
+      col.onDelete = fk.onDelete ?? null;
+      col.onUpdate = fk.onUpdate ?? null;
+    });
   }
   return { name: acc.name, line: acc.line, cols, indexes: acc.indexes, uniques: acc.uniques }; // resolve() checks the uniques
 }

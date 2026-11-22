@@ -633,9 +633,61 @@ Gizmo
   Flag bool
   Released year
 `,
+  // arrows to every column of a key over several columns are one foreign key: a row points at one row with all of them
+  'combined keys': `COrder
+  Id
+  Created date
+Variant
+  Id
+  Name
+ProductToOrder
+  OrderId -> COrder
+  VariantId -> Variant
+  Quantity int
+  pk (OrderId, VariantId)
+Return
+  Id
+  OrderId -> ProductToOrder.OrderId
+  VariantId -> ProductToOrder.VariantId
+  Code vc(8)
+  Batch tinyint
+  unique (Code, Batch)
+Refund
+  Id
+  ReturnBatch tinyint null -> Return.Batch
+  ReturnCode vc(8) null -> Return.Code
+  Amount decimal(8,2)
+`,
+  // two foreign keys to one key: each row's From and To are a city each
+  'two fks to one key': `City
+  Name vc(40)
+  Country char(2)
+  Population int
+  pk (Name, Country)
+Route
+  Id
+  FromName -> City.Name
+  FromCountry -> City.Country
+  ToName null -> City.Name
+  ToCountry null -> City.Country
+  Km int
+`,
+  'two fks to one key, interleaved': `City
+  Name vc(40)
+  Country char(2)
+  pk (Name, Country)
+Route
+  Id
+  FromName -> City.Name
+  ToName null -> City.Name
+  FromCountry -> City.Country
+  ToCountry null -> City.Country
+`,
 };
+// How many foreign keys over several columns the tables of some of them have
+const GROUPS = { 'combined keys': { Return: 1, Refund: 1 }, 'two fks to one key': { Route: 2 }, 'two fks to one key, interleaved': { Route: 2 } };
 
-const ctx = require('./load')({ process, MORE });
+const ctx = require('./load')({ process, MORE, GROUPS });
 vm.runInContext(`
 K = prepareKinds(SAMPLE_KINDS);
 let failures = 0;
@@ -672,6 +724,16 @@ for (const [name, src] of Object.entries({ ...EXAMPLES, ...MORE })) for (const c
           if (ti.base === 'date' && !/^\\d{4}-\\d\\d-\\d\\d$/.test(v)) fail(where, c.name + ' = ' + v + ' is not a date');
         }
       }
+      // the arrows of a key over several columns point at one row together, or are all NULL
+      for (const g of t.fkGroups) {
+        const names = '(' + g.cols.map(c => c.name).join(', ') + ')';
+        for (const row of rows) {
+          const vs = g.cols.map(c => row.values.get(c));
+          if (vs.some(v => v == null)) { if (vs.some(v => v != null)) fail(where, names + ' = (' + vs.join(', ') + ') is partly NULL'); continue; }
+          if (!data.get(g.target).some(o => g.targetCols.every((tc, k) => o.values.get(tc) === vs[k]))) fail(where, names + ' = (' + vs.join(', ') + ') points nowhere');
+        }
+      }
+      if (GROUPS[name] && t.fkGroups.length !== (GROUPS[name][t.name] ?? 0)) fail(where, t.fkGroups.length + ' foreign keys over several columns');
     }
   }
 }

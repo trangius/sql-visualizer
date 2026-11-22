@@ -43,6 +43,104 @@ Shipment
   Id
   LineNo -> OrderLine.LineNo
 `, { oracle: 'Oracle needs OrderLine.LineNo', mysql: 'MySQL needs OrderLine.LineNo', sqlite: 'SQLite needs OrderLine.LineNo', postgres: 'PostgreSQL needs', mssql: 'SQL Server needs' }],
+  // arrows to every column of a key over several columns are one foreign key: Return's is added after the
+  // tables (they point at each other), Refund's is to a unique (…)
+  'fk over keys of several columns': [`Return
+  Id
+  OrderId -> ProductToOrder.OrderId [delete cascade]
+  VariantId -> ProductToOrder.VariantId [delete cascade]
+  Code vc(10)
+  Batch int
+  unique (Code, Batch)
+ProductToOrder
+  OrderId int
+  VariantId int
+  Quantity int
+  LastReturnId null -> Return
+  pk (OrderId, VariantId)
+Refund
+  Id
+  ReturnBatch int null -> Return.Batch
+  ReturnCode vc(10) null -> Return.Code
+`],
+  'fk to some columns of a key': [`Shelf
+  Aisle int
+  Bay int
+  Level int
+  pk (Aisle, Bay, Level)
+Box
+  Id
+  Aisle -> Shelf.Aisle
+  Bay -> Shelf.Bay
+`, { oracle: 'Oracle needs Shelf.Bay', mysql: 'MySQL needs Shelf.Aisle', sqlite: 'SQLite needs Shelf.Bay', postgres: 'PostgreSQL needs Shelf.Aisle', mssql: 'SQL Server needs Shelf.Bay' }],
+  // Room and Number are one foreign key; Spare, left over, is one of its own
+  'fk to a key column once more': [`Seat
+  Room int
+  Number int
+  pk (Room, Number)
+Ticket
+  Id
+  Room -> Seat.Room
+  Number -> Seat.Number
+  Spare -> Seat.Number
+`, { oracle: 'Oracle needs Seat.Number', mysql: 'MySQL needs Seat.Number', sqlite: 'SQLite needs Seat.Number', postgres: 'PostgreSQL needs Seat.Number', mssql: 'SQL Server needs Seat.Number' }],
+  // two foreign keys to one key: the first arrow to each of its columns, then the next
+  'two fks to one key': [`City
+  Name vc(40)
+  Country char(2)
+  Population int
+  pk (Name, Country)
+Route
+  Id
+  FromName -> City.Name [delete cascade]
+  FromCountry -> City.Country [delete cascade]
+  ToName null -> City.Name
+  ToCountry null -> City.Country
+  Km int
+`],
+  'two fks to one key, interleaved': [`City
+  Name vc(40)
+  Country char(2)
+  Population int
+  pk (Name, Country)
+Route
+  Id
+  FromName -> City.Name [delete cascade]
+  ToName null -> City.Name
+  FromCountry -> City.Country [delete cascade]
+  ToCountry null -> City.Country
+  Km int
+`],
+  // a delete in City reaches Route by both
+  'two cascading fks to one key': [`City
+  Name vc(40)
+  Country char(2)
+  pk (Name, Country)
+Route
+  Id
+  FromName -> City.Name [delete cascade]
+  FromCountry -> City.Country [delete cascade]
+  ToName -> City.Name [delete cascade]
+  ToCountry -> City.Country [delete cascade]
+`, { mssql: 'SQL Server refuses [delete cascade] here: it would reach Route a second time' }],
+  'fk over a key with other actions': [`Line
+  OrderNo int
+  LineNo int
+  pk (OrderNo, LineNo)
+Note
+  Id
+  OrderNo -> Line.OrderNo [delete cascade]
+  LineNo -> Line.LineNo [update cascade]
+`, 'OrderNo and LineNo point at Line (OrderNo, LineNo) together, as one foreign key: write the same [delete …] and [update …] on both'],
+  'fk over a key of another type': [`Line
+  OrderNo int
+  LineNo smallint
+  pk (OrderNo, LineNo)
+Note
+  Id
+  OrderNo -> Line.OrderNo
+  LineNo int -> Line.LineNo
+`, { mariadb: 'LineNo is int but Line.LineNo is smallint', mysql: 'LineNo is int but Line.LineNo is smallint', mssql: 'SQL Server needs the same type' }],
   'fk of another integer type': [`Owner
   Id
 Pet
@@ -267,8 +365,16 @@ const db = sql => spawnSync(client, ['-u' + user, '--batch'], { input: sql, enco
 
 const ctx = require('./load')();
 const DIALECTS = vm.runInContext('DIALECTS', ctx), DBS = Object.keys(DIALECTS), NAME = d => DIALECTS[d].name;
+// The foreign keys over several columns of some CASES: [table, its columns, the table they point at, its columns,
+// added after the tables]
+const ROUTE = [['Route', ['FromName', 'FromCountry'], 'City', ['Name', 'Country'], false], ['Route', ['ToName', 'ToCountry'], 'City', ['Name', 'Country'], false]];
+const COMBINED = {
+  'fk over keys of several columns': [['Return', ['OrderId', 'VariantId'], 'ProductToOrder', ['OrderId', 'VariantId'], true],
+    ['Refund', ['ReturnCode', 'ReturnBatch'], 'Return', ['Code', 'Batch'], false]],
+  'two fks to one key': ROUTE, 'two fks to one key, interleaved': ROUTE,
+};
 // Types written another way, read back as others: uuid is CHAR(36) in MariaDB, every integer INTEGER in SQLite
-const LOSSY = { 'every type': DBS, 'fk of another integer type': ['sqlite'], 'fk of another sign': ['sqlite'] };
+const LOSSY = { 'every type': DBS, 'fk of another integer type': ['sqlite'], 'fk of another sign': ['sqlite'], 'fk over a key of another type': ['sqlite'] };
 const parse = vm.runInContext(`(src, sql, dialect) => {
   const r = sql ? parseSQL(src, dialect) : parseText(src);
   r.problems.push(...resolve(r.tables), ...dialectProblems(r.tables, dialect));
@@ -340,6 +446,21 @@ const RUN = {
         fail(where, 'SQL and back changed it:\n' + toText(schema, dialect));
       }
       if (name === 'enum keeps its case' && !/'Small','Large'/.test(script)) fail(where, 'enum values changed case');
+      if (COMBINED[name]) {
+        // one FOREIGN KEY for each key's arrows, in the key's order, named after all its columns where the script
+        // names it; added after the tables where its table is made first (SQLite's in the table all the same); no
+        // warning about them, and no index of MariaDB's on the columns they point at
+        const D = DIALECTS[dialect], T = n => (D.schema ? D.q(D.schema) + '.' : '') + D.q(n), list = cols => cols.map(D.q).join(', ');
+        const said = r.problems.map(p => p.msg);
+        if (said.length) fail(where, 'problems ' + JSON.stringify(said));
+        for (const [from, cols, to, tcols, later] of COMBINED[name]) {
+          const named = D.names && !D.names.own.includes('fk') ? `CONSTRAINT ${D.q(`FK_${from}_${cols.join('_')}`)} ` : '';
+          const fk = `${named}FOREIGN KEY (${list(cols)}) REFERENCES ${T(to)}(${list(tcols)})`, line = schema.split('\n').find(l => l.includes(fk));
+          if (!line) fail(where, `no ${fk}`);
+          else if ((later && !D.fkInline) !== line.startsWith(`ALTER TABLE ${T(from)} ADD `)) fail(where, `${from}'s key ${later ? 'not ' : ''}added after the tables: ${line}`);
+        }
+        if (/\bINDEX\b/.test(schema)) fail(where, 'an index for a key over several columns');
+      }
       if (name === 'stand-in types and shapes') {
         // a type the database hasn't is said, as the one that stands in for it; a shape is NULL in the sample rows,
         // and a table where one can't be gets none
