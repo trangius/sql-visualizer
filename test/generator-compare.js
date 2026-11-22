@@ -58,7 +58,7 @@ function jaidbText(tables, skip) {
     for (const c of t.cols) {
       const parts = [c.name];
       if (c.type) parts.push(c.type);
-      if (c.isPk) parts.push(composite ? 'pk' + (t.pkCols.indexOf(c) + 1) : 'pk');
+      if (c.isPk && !composite) parts.push('pk');
       if (c.nullable) parts.push('null');
       if (c.unique) parts.push('unique');
       if (c.ref && c.target) {
@@ -72,7 +72,8 @@ function jaidbText(tables, skip) {
       if (/^(enum|set)\(/.test(c.effType ?? '')) skip('enum/set CHECK (the type itself is kept)');
       out.push('  ' + parts.join(' '));
     }
-    if (t.multiUniques.length) skip('unique over several columns', t.multiUniques.length);
+    if (composite) out.push(`  pk (${t.pkCols.map(c => c.name).join(', ')})`);
+    for (const u of t.multiUniques) out.push(`  unique (${u.cols.map(c => c.name).join(', ')})`);
     if (t.multiIndexes.length) skip('index over several columns', t.multiIndexes.length);
     out.push('');
   }
@@ -82,7 +83,7 @@ function jaidbText(tables, skip) {
 // What jaidb has not, taken out of the model before sql_visualizer writes it
 function stripModel(tables) {
   for (const t of tables) {
-    t.indexes = []; t.multiIndexes = []; t.multiUniques = [];
+    t.indexes = []; t.multiIndexes = [];
     for (const c of t.cols) { c.default = null; c.indexed = false; }
   }
 }

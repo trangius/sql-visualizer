@@ -1,5 +1,5 @@
 // Reads a schema in jaidb's Simple text (the syntax Squill uses: `-> Owner on delete cascade`,
-// `pk1`/`pk2` for a key of several columns) and prints, as JSON on stdout, for each engine jaidb
+// `pk (A, B)` and `unique (A, B)` lines for keys of several columns) and prints, as JSON on stdout, for each engine jaidb
 // has: the SQL generate_schema_sql makes, what it says it left out (unmade), and the problems
 // parse_schema found. test/generator-compare.js builds and runs it; to run it by hand:
 //
