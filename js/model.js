@@ -245,20 +245,6 @@ linestring polygon`.split(/\s+/));
 const TYPE_MODIFIERS = new Set(['unsigned', 'signed', 'zerofill', 'precision']);
 const FLAG_WORDS = ['pk', 'null', 'unique', 'auto_increment', 'a_i'];
 
-// What a foreign key compares: integers by size and sign, decimals by precision and scale,
-// strings without their length. null for TEXT, BLOB and JSON, which can't be keys at all.
-const INT_SIZE = { tinyint: 'tinyint', bool: 'tinyint', boolean: 'tinyint', smallint: 'smallint',
-  mediumint: 'mediumint', int: 'int', integer: 'int', bigint: 'bigint', serial: 'bigint' };
-function keyType(t) {
-  const { base, args, rest, unsigned } = typeParts(t);
-  if (base in INT_SIZE) return INT_SIZE[base] + (base === 'serial' || unsigned ? ' unsigned' : '');
-  if (/^(decimal|dec|numeric|fixed)$/.test(base)) return `decimal(${(args ?? '10').replace(/^(\d+)$/, '$1,0')})` + rest;
-  if (/^(vc|varchar|char)$/.test(base)) return 'string';
-  if (/^(binary|varbinary)$/.test(base)) return 'binary';
-  if (/(text|blob)$|^json$/.test(base)) return null;
-  return base + rest;
-}
-
 // Levenshtein distance, for "did you mean …?"
 function editDistance(a, b) {
   let row = [...Array(b.length + 1).keys()];

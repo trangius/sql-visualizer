@@ -288,6 +288,17 @@ function fitValue(v, ti, key) {
   const s = String(v);
   return ti.len ? s.slice(0, ti.len).trimEnd() : s;
 }
+// A value of a column a foreign key of another type points at (`to`, the key's column's `from`) that both hold as it
+// is, so the database finds it: the key's column's as the other's, a whole number between a float and another kind of
+// number (a REAL's 0.1 is no DOUBLE's), a date without its time. A number and something else are left as they are.
+const isNumber = ti => ti.int || ti.dec, isFloat = ti => /^(float|double|real)$/.test(ti.base);
+function bothHold(v, from, to) {
+  if (v == null || isNumber(from) !== isNumber(to)) return v;
+  if (from.date && to.date) return from.base === 'date' || to.base === 'date' ? v.slice(0, 10) : v;
+  let s = fitValue(v, from, '');
+  if (isNumber(from) && from.base !== to.base && (isFloat(from) || isFloat(to))) s = String(Math.round(+s));
+  return fitValue(s, to, '');
+}
 
 function rawValue(t, c, i, ctx, ti, key) {
   const plan = ctx.plans.get(c), D = langData(ctx.lang);
@@ -417,9 +428,9 @@ function dedupe(t, rows) {
     rows.forEach((r, i) => {
       let k = tupleKey(r, set);
       if (k != null && seen.has(k)) {
-        const { int, len } = typeInfo(c), sfx = ` ${i + 1}`, v = r.values.get(c);
+        const ti = typeInfo(c), { int, dec, len } = ti, sfx = ` ${i + 1}`, v = r.values.get(c);
         // shortened to make room for the number, so it still fits in the column
-        r.values.set(c, int ? String(1000 + i) : len ? (v.slice(0, Math.max(0, len - sfx.length)) + sfx).slice(-len) : v + sfx);
+        r.values.set(c, int ? String(1000 + i) : dec ? fitValue(1000 + i, ti, '') : len ? (v.slice(0, Math.max(0, len - sfx.length)) + sfx).slice(-len) : v + sfx);
         k = tupleKey(r, set);
       }
       seen.add(k);
@@ -500,12 +511,12 @@ function sampleData(tables, n = SAMPLE_ROWS) {
     const has = f => own.some(p => p.field === f);
     for (const p of own) if (p.field === 'name') p.field = has('first') ? 'last' : has('last') ? 'first' : 'name';
   }
-  for (const t of tables) {
-    // a shape that can't be null can't be made up: no rows (shapelessNotes says so)
-    const rows = shapeColumn(t) ? [] : tableRows(t, isJunction(t) ? 2 * n : n, lang, plans);
-    dedupe(t, rows);
-    data.set(t, rows);
+  // a shape that can't be null can't be made up: no rows (shapelessNotes says so)
+  for (const t of tables) data.set(t, shapeColumn(t) ? [] : tableRows(t, isJunction(t) ? 2 * n : n, lang, plans));
+  for (const t of tables) for (const c of t.cols) if (c.target && !c.implicit && c.effType !== c.targetCol.effType) {
+    for (const r of data.get(c.target)) r.values.set(c.targetCol, bothHold(r.values.get(c.targetCol), typeInfo(c), typeInfo(c.targetCol)));
   }
+  for (const t of tables) dedupe(t, data.get(t));
   // Foreign keys: values that exist in the column they point to. A table is finished
   // (including rows dropped as duplicates) before the tables pointing to it use its values.
   // Some rows are picked more often than others, as in real data.

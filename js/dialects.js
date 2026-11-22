@@ -214,21 +214,46 @@ const keyedCol = (t, c) => c.isPk || c.unique || t.multiUniques.some(u => u.cols
 const lobKeyProblems = (tables, isLob, db) => tables.flatMap(t => t.cols.filter(c => keyedCol(t, c) && isLob(c.effType)).map(c =>
   problem(c.line, `${db} can't make a key or index of ${c.name} (${c.effType}). Use vc instead.`)));
 
-// A foreign key's two sides must be of one family: family(type), null for a type that can't be linked at all
-function linkTypeProblems(tables, family, why) {
+// A foreign key's two sides must be of types that fit: fits(its column's type, the one it points at), else `why`
+// ends the problem; unlinkable(type): no foreign key may be over the type at all
+function linkTypeProblems(tables, unlinkable, fits, why) {
   const problems = [];
   for (const { c } of links(tables)) {
     const tc = c.targetCol, where = `${c.target.name}.${tc.name}`;
-    const a = family(c.effType), b = family(tc.effType);
-    if (a === null || b === null) {
-      problems.push(problem(c.line, `${b === null ? where : c.name} is ${b === null ? tc.effType : c.effType}, ` +
+    if (unlinkable(c.effType) || unlinkable(tc.effType)) {
+      const there = unlinkable(tc.effType);
+      problems.push(problem(c.line, `${there ? where : c.name} is ${there ? tc.effType : c.effType}, ` +
         'which can\'t be part of a foreign key. Use vc instead.'));
-    } else if (a !== b) {
-      problems.push(problem(c.line, `${c.name} is ${c.effType} but ${where} is ${tc.effType}. ${why}`));
+    } else if (!fits(c.effType, tc.effType)) {
+      problems.push(problem(c.line, `${c.name} is ${c.effType} but ${where} is ${tc.effType}${why}`));
     }
   }
   return problems;
 }
+
+// The SQL type a foreign key compares, as jaidb's key_type_sql: as typeSQL writes it, without the fraction of a
+// second that goes without saying (D.defaultFraction: TIME(7) is TIME), its sizes left out where they may differ
+// (D.keyLengthsMayDiffer)
+function keyTypeSQL(t, D) {
+  let s = typeSQL(t, D);
+  const f = D.defaultFraction;
+  if (f && s.endsWith(f.size) && f.types.includes(s.slice(0, -f.size.length))) s = s.slice(0, -f.size.length);
+  if (!D.keyLengthsMayDiffer) return s;
+  let depth = 0, out = '';
+  for (const ch of s) { if (ch === '(') depth++; else if (ch === ')') depth--; else if (!depth) out += ch; }
+  return out.trim();
+}
+// Whether a foreign key from a column of type `a` may point at one of type `b`, as jaidb's key_types_fit says: as
+// keyTypeSQL writes them one type, or of one of D.keyTypeKinds ({ type: kind }, both ways), or `a` one that
+// D.keyTypeWidenings ({ from: [to] }, one way) lets point at `b`
+function keyTypesFit(a, b, D) {
+  if (a === b) return true;
+  const from = keyTypeSQL(a, D), to = keyTypeSQL(b, D), kind = D.keyTypeKinds?.[from];
+  return from === to || (!!kind && kind === D.keyTypeKinds[to]) || !!D.keyTypeWidenings?.[from]?.includes(to);
+}
+// What a database refuses of a foreign key's types, in jaidb's words (D.keyTypesNeeded)
+const keyTypeProblems = (tables, D, unlinkable = () => false) => linkTypeProblems(tables, unlinkable, (a, b) => keyTypesFit(a, b, D),
+  `: ${D.name} needs a foreign key's columns ${D.keyTypesNeeded}`);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 // A type as jaidb writes it for the database (written_type), with no server version known: one past its size
@@ -281,6 +306,9 @@ const SPATIAL = ['geometry', 'point', 'linestring', 'polygon'];
 const MARIADB_TYPES = { real: ['DOUBLE'] };
 const MARIADB_NATIVE = [...SPATIAL, 'enum', 'set'];
 const MARIADB_SIZE_LIMITS = { char: [255, 'vc(%)'], binary: [255, 'varbinary(%)'] };
+// A foreign key joins numbers of one type and sign, and strings, binaries, decimals and times of any size
+const MARIADB_KEY_KINDS = { VARCHAR: 'string', CHAR: 'string', VARBINARY: 'binary', BINARY: 'binary', DATETIME: 'datetime', TIMESTAMP: 'datetime',
+  TINYINT: 'tinyint', BOOL: 'tinyint' };
 // MySQL: no UUID nor INET; no key over TEXT, BLOB, JSON or a spatial type
 const MYSQL_NATIVE = ['json', ...SPATIAL, 'enum', 'set'];
 const MYSQL_UNKEYABLE = [...TEXT_TYPES, ...BLOB_TYPES, 'json', ...SPATIAL];
@@ -297,7 +325,13 @@ const PG_TYPES = {
   ...typeRows(TEXT_TYPES, ['TEXT']), ...typeRows([...BLOB_TYPES, 'binary', 'varbinary'], ['BYTEA']), year: ['SMALLINT'],
 };
 const PG_NATIVE = ['uuid', 'inet', 'cidr', 'macaddr', 'interval', 'json', 'jsonb', 'xml', 'point', 'polygon', 'money'];
-const pgType = t => typeSQL(t, DIALECTS.postgres);
+// A foreign key joins integers, floats, dates and times, strings and networks each of one kind, and points from a
+// number at a wider kind of number and from a time at a time with a zone or an interval, which it converts to;
+// not the other way (jaidb's key_type_kinds and key_type_widenings)
+const PG_KEY_KINDS = { ...typeRows(['SMALLINT', 'INT', 'BIGINT'], 'integer'), ...typeRows(['REAL', 'DOUBLE PRECISION'], 'float'),
+  ...typeRows(['DATE', 'TIMESTAMP', 'TIMESTAMPTZ'], 'datetime'), ...typeRows(['VARCHAR', 'CHAR', 'TEXT'], 'text'), ...typeRows(['INET', 'CIDR'], 'network') };
+const PG_KEY_WIDENINGS = { ...typeRows(['SMALLINT', 'INT', 'BIGINT'], ['NUMERIC', 'REAL', 'DOUBLE PRECISION']),
+  NUMERIC: ['REAL', 'DOUBLE PRECISION'], TIME: ['TIMETZ', 'INTERVAL'] };
 
 // SQL Server: text is NVARCHAR, so any language fits. NVARCHAR holds 4000 characters and the others 8000 bytes,
 // past which they are (MAX), which no key may be over; a BIT is one bit.
@@ -410,14 +444,13 @@ function genSchema(tables, D) {
 function mariadbProblems(tables) {
   const problems = links(tables).filter(({ c }) => !isKey(c)).map(({ c }) => problem(c.line,
     `${c.target.name}.${c.targetCol.name} is neither the primary key nor unique. The SQL adds an index on it, but normally it should be unique.`, 'warn'));
-  return [...problems, ...linkTypeProblems(tables, keyType, SAME_TYPE)];
+  return [...problems, ...keyTypeProblems(tables, DIALECTS.mariadb, isLobType)];
 }
-const SAME_TYPE = 'A foreign key needs the same type on both sides.';
 const isLobType = t => /(text|blob)$|^json$/.test(typeParts(t).base);
 
 // MySQL 8.4 only links to a key, can't make a key of TEXT, and a key is at most 3072 bytes (768 characters)
 function mysqlProblems(tables) {
-  const problems = [...keyProblems(tables, 'MySQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mysql), 'MySQL'), ...linkTypeProblems(tables, keyType, SAME_TYPE)];
+  const problems = [...keyProblems(tables, 'MySQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mysql), 'MySQL'), ...keyTypeProblems(tables, DIALECTS.mysql, isLobType)];
   for (const t of tables) {
     for (const c of t.cols) {
       const { base, args } = typeParts(c.effType);
@@ -429,19 +462,12 @@ function mysqlProblems(tables) {
   return problems;
 }
 
-// Postgres compares a foreign key's types loosely: any integer to any integer, any text to any text
-const pgFamily = t => {
-  const s = pgType(t);
-  return /^(SMALLINT|INT|BIGINT|SERIAL)$/.test(s) ? 'integer' : /^(VARCHAR|CHAR|TEXT)\b/.test(s) ? 'text'
-    : /^(NUMERIC|DECIMAL)\b/.test(s) ? 'numeric' : s.replace(/\(.*\)/, '');
-};
-
 const postgresProblems = tables => [...keyProblems(tables, 'PostgreSQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.postgres), 'PostgreSQL'),
-  ...linkTypeProblems(tables, pgFamily, "PostgreSQL can't link them.")];
+  ...keyTypeProblems(tables, DIALECTS.postgres)];
 
 function mssqlProblems(tables) {
   const problems = [...keyProblems(tables, 'SQL Server'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mssql), 'SQL Server'),
-    ...linkTypeProblems(tables, t => isMax(t) ? null : mssqlType(t), 'SQL Server needs the same type and length on both sides.')];
+    ...keyTypeProblems(tables, DIALECTS.mssql, isMax)];
   for (const t of tables) {
     for (const c of t.cols) {
       const n = +(mssqlType(c.effType).match(/^NVARCHAR\((\d+)\)/)?.[1] ?? 0);
@@ -508,8 +534,9 @@ function oracleSkipIndexes(tables) {
 }
 
 function oracleProblems(tables) {
-  const family = t => isClob(t) ? null : oracleType(t).replace(/\(.*\)/, ''); // lengths may differ, CHAR and VARCHAR2 may not
-  return [...keyProblems(tables, 'Oracle'), ...lobKeyProblems(tables, isClob, 'Oracle'), ...linkTypeProblems(tables, family, "Oracle can't link them."),
+  const family = t => oracleType(t).replace(/\(.*\)/, ''); // lengths may differ, CHAR and VARCHAR2 may not
+  return [...keyProblems(tables, 'Oracle'), ...lobKeyProblems(tables, isClob, 'Oracle'),
+    ...linkTypeProblems(tables, isClob, (a, b) => family(a) === family(b), ". Oracle can't link them."),
     ...links(tables).filter(({ c }) => c.onUpdate).map(({ c }) =>
       problem(c.line, `Oracle has no [update ${c.onUpdate}]: a key isn't meant to change there. Leave it out.`))];
 }
@@ -525,6 +552,8 @@ function oracleProblems(tables) {
 // filtered unique index. inlineIndexes: indexes go inside CREATE TABLE. enumCheck: an enum gets a CHECK.
 // autoAlone, defaultFirst, deferredTail, skipIndexes: Oracle's, see genSchema.
 // Sample rows (sampleInserts): dataStart/dataEnd go around them, dataTable(t) around each table's.
+// What a foreign key's types must be (keyTypesFit): keyLengthsMayDiffer, keyTypeKinds, keyTypeWidenings,
+// defaultFraction, and keyTypesNeeded to say it.
 
 const sqlStr = s => `'${s.replace(/'/g, "''")}'`;
 const upperBool = b => b ? 'TRUE' : 'FALSE';
@@ -537,6 +566,7 @@ const COMMON = {
 const MARIADB = {
   ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true,
   types: MARIADB_TYPES, native: MARIADB_NATIVE, sizeLimits: MARIADB_SIZE_LIMITS, varchar: 'VARCHAR', signWords: true,
+  keyLengthsMayDiffer: true, keyTypeKinds: MARIADB_KEY_KINDS, keyTypesNeeded: 'of one type and sign, their sizes aside',
   names: { name: mariadbName, own: ['pk', 'unique'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema' }, max: 64 },
   autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, enumCheck: false,
   keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
@@ -564,6 +594,8 @@ const DIALECTS = {
   postgres: {
     ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"', '"', true), schema: 'public', maxName: 63,
     types: PG_TYPES, native: PG_NATIVE, varchar: 'VARCHAR', unkeyable: ['json', 'point', 'polygon', 'xml'],
+    keyLengthsMayDiffer: true, keyTypeKinds: PG_KEY_KINDS, keyTypeWidenings: PG_KEY_WIDENINGS,
+    keyTypesNeeded: "of one kind, or the first of a type it converts to the second's by itself",
     names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema' }, max: 63, exact: true },
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', dropTail: 'CASCADE', problems: postgresProblems,
     bool: (b, c) => c && /^bit\b/.test(c.effType) ? `B'${b ? 1 : 0}'` : upperBool(b),
@@ -579,6 +611,7 @@ const DIALECTS = {
     ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', maxName: 128, nPrefix: true,
     types: MSSQL_TYPES, native: ['geometry', 'money', 'xml', 'rowversion'], sizeLimits: MSSQL_SIZE_LIMITS, varchar: 'NVARCHAR',
     unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema'),
+    defaultFraction: { size: '(7)', types: ['TIME', 'DATETIMEOFFSET', 'DATETIME2'] }, keyTypesNeeded: 'of the same type and size',
     autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
     dropKey: (T, name) => `IF OBJECT_ID(N'${T}', N'U') IS NOT NULL ALTER TABLE ${T} DROP CONSTRAINT IF EXISTS ${name};`,
     str: s => 'N' + sqlStr(s), bool: b => b ? '1' : '0', today: 'CAST(GETDATE() AS DATE)',

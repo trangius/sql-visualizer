@@ -140,19 +140,19 @@ Note
   Id
   OrderNo -> Line.OrderNo
   LineNo int -> Line.LineNo
-`, { mariadb: 'LineNo is int but Line.LineNo is smallint', mysql: 'LineNo is int but Line.LineNo is smallint', mssql: 'SQL Server needs the same type' }],
+`, { mariadb: 'LineNo is int but Line.LineNo is smallint', mysql: 'LineNo is int but Line.LineNo is smallint', mssql: "SQL Server needs a foreign key's columns of the same type and size" }],
   'fk of another integer type': [`Owner
   Id
 Pet
   Id
   OwnerId bigint -> Owner
-`, { mariadb: 'OwnerId is bigint but Owner.Id is int', mysql: 'OwnerId is bigint but Owner.Id is int', mssql: 'SQL Server needs the same type' }],
+`, { mariadb: 'OwnerId is bigint but Owner.Id is int', mysql: 'OwnerId is bigint but Owner.Id is int', mssql: "SQL Server needs a foreign key's columns of the same type and size" }],
   'fk of another sign': [`Owner
   Code int unsigned pk
 Pet
   Id
   OwnerCode int -> Owner
-`, { mariadb: 'OwnerCode is int but Owner.Code is int unsigned', mysql: 'OwnerCode is int but Owner.Code is int unsigned', mssql: 'SQL Server needs the same type' }],
+`, { mariadb: 'OwnerCode is int but Owner.Code is int unsigned', mysql: 'OwnerCode is int but Owner.Code is int unsigned', mssql: "SQL Server needs a foreign key's columns of the same type and size" }],
   'fk to a text column': [`Tag
   Id
   Body text unique
@@ -165,7 +165,58 @@ Note
 City
   Id
   Country vc(2) -> Country
-`, { mssql: 'SQL Server needs the same type', oracle: "Oracle can't link them" }],
+`, { mssql: "SQL Server needs a foreign key's columns of the same type and size", oracle: "Oracle can't link them" }],
+  // as jaidb's key_types_fit says, which the servers bore out: MariaDB and MySQL join decimals of any size and a
+  // DATETIME to a TIMESTAMP; PostgreSQL a number to a wider kind of number and a date to a timestamp, not the other way
+  'fk between decimals of two precisions': [`Item
+  Id
+  Price decimal(10,2) unique
+Offer
+  Id
+  Price decimal(8,2) -> Item.Price
+`, { mssql: "Price is decimal(8,2) but Item.Price is decimal(10,2): SQL Server needs a foreign key's columns of the same type and size" }],
+  'fk from a datetime to a timestamp': [`Event
+  Id
+  At timestamp unique
+Reminder
+  Id
+  EventAt datetime -> Event.At
+`],
+  'fk to a wider kind of number': [`Measure
+  Id
+  Whole decimal(10,2) unique
+  Exact double unique
+  Single double unique
+Reading
+  Id
+  Whole int -> Measure.Whole
+  Exact int -> Measure.Exact
+  Single real -> Measure.Single
+`, { mariadb: "Whole is int but Measure.Whole is decimal(10,2): MariaDB needs a foreign key's columns of one type and sign, their sizes aside", mysql: "Whole is int but Measure.Whole is decimal(10,2): MySQL needs a foreign key's columns of one type and sign, their sizes aside",
+    mssql: "Single is real but Measure.Single is double: SQL Server needs a foreign key's columns of the same type and size", oracle: "Exact is int but Measure.Exact is double. Oracle can't link them" }],
+  'fk from a date to a timestamp': [`Event
+  Id
+  At timestamp unique
+Reminder
+  Id
+  EventDay date -> Event.At
+`, { mariadb: "EventDay is date but Event.At is timestamp: MariaDB needs a foreign key's columns of one type and sign, their sizes aside", mysql: "EventDay is date but Event.At is timestamp: MySQL needs a foreign key's columns of one type and sign, their sizes aside",
+    mssql: "EventDay is date but Event.At is timestamp: SQL Server needs a foreign key's columns of the same type and size", oracle: "EventDay is date but Event.At is timestamp. Oracle can't link them" }],
+  'fk from a decimal to an int': [`Owner
+  Id
+Pet
+  Id
+  OwnerId decimal(10,2) -> Owner
+`, { mariadb: "OwnerId is decimal(10,2) but Owner.Id is int: MariaDB needs a foreign key's columns of one type and sign, their sizes aside", mysql: "OwnerId is decimal(10,2) but Owner.Id is int: MySQL needs a foreign key's columns of one type and sign, their sizes aside",
+    postgres: "OwnerId is decimal(10,2) but Owner.Id is int: PostgreSQL needs a foreign key's columns of one kind, or the first of a type it converts to the second's by itself", mssql: "OwnerId is decimal(10,2) but Owner.Id is int: SQL Server needs a foreign key's columns of the same type and size" }],
+  'fk from a double to a decimal': [`Item
+  Id
+  Price decimal(10,2) unique
+Offer
+  Id
+  Price double -> Item.Price
+`, { mariadb: "Price is double but Item.Price is decimal(10,2): MariaDB needs a foreign key's columns of one type and sign, their sizes aside", mysql: "Price is double but Item.Price is decimal(10,2): MySQL needs a foreign key's columns of one type and sign, their sizes aside",
+    postgres: "Price is double but Item.Price is decimal(10,2): PostgreSQL needs a foreign key's columns of one kind, or the first of a type it converts to the second's by itself", mssql: "Price is double but Item.Price is decimal(10,2): SQL Server needs a foreign key's columns of the same type and size", oracle: "Oracle can't link them" }],
   'delete, update and default': [`Owner
   Id
   Name vc(50) [default 'Anna ''Ann'' #1']  # comment
