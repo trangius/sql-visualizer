@@ -319,9 +319,9 @@ for (const [name, [src, expects, from = 'mariadb']] of SCHEMAS) {
   stripModel(r.tables);
   const jb = jaidb(text);
   for (const [d, E] of Object.entries(ENGINES)) {
-    if (problemsBy[d].length) { refused.push([name, d, 'sv', problemsBy[d][0].msg]); continue; }
-    const errors = jb[E].problems.filter(p => !p.warning);
-    if (errors.length) { refused.push([name, d, 'jaidb', errors[0].message]); continue; }
+    // A schema one refuses on an engine is not compared there; whether the other refuses it too is said.
+    const svError = problemsBy[d][0]?.msg, jbError = jb[E].problems.find(p => !p.warning)?.message;
+    if (svError || jbError) { refused.push([name, d, svError && jbError ? 'both' : svError ? 'sv alone' : 'jaidb alone', svError ?? jbError]); continue; }
     for (const u of jb[E].unmade) unmadeNotes.push(`${name} (${d}): ${u}`);
     const diffs = compare(svScript(genSQL(r.tables, d)), jb[E].sql), jbNotes = typeNotes(jb[E].unmade, jb[E].name);
     for (const m of svNotes[d].filter(m => !jbNotes.includes(m))) diffs.push({ category: 'notes', kind: 'type note only in sv', detail: m });
@@ -337,9 +337,9 @@ say(`${SCHEMAS.length} schemas (js/examples.js, test/sql-check.js CASES, test/fi
 say('Per engine: schemas that match');
 for (const [d, r] of Object.entries(results)) say(`  ${d.padEnd(9)} ${r.matched.length}/${r.compared}` + (r.matched.length ? `  (${r.matched.join(', ')})` : ''));
 say('\nNot compared');
-const why = new Map(); // schema → [engines, first reason]
-for (const [s, d, who, msg] of refused) { const w = why.get(s) ?? [[], `${who} refuses: ${msg}`]; w[0].push(d); why.set(s, w); }
-for (const [s, [ds, msg]] of why) say(`  ${s} (${ds.join(', ')}) — ${msg.length > 90 ? msg.slice(0, 90) + '…' : msg}`);
+const why = new Map(); // schema and who refuses → [engines, first reason]
+for (const [s, d, who, msg] of refused) { const k = `${s}\n${who}`, w = why.get(k) ?? [[], `${who === 'both' ? 'both refuse' : who + ' refuses'}: ${msg}`]; w[0].push(d); why.set(k, w); }
+for (const [k, [ds, msg]] of why) say(`  ${k.split('\n')[0]} (${ds.join(', ')}) — ${msg.length > 90 ? msg.slice(0, 90) + '…' : msg}`);
 say('\nLeft out of the jaidb text (what its model has not)');
 for (const [f, e] of skipped) say(`  ${f}: ${e.count} in ${e.schemas.size} schema${e.schemas.size > 1 ? 's' : ''}`);
 if (unmadeNotes.length) { say('\njaidb unmade'); for (const n of unmadeNotes) say('  ' + n); }
