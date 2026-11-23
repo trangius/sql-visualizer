@@ -226,6 +226,23 @@ for (const notation of ['arrows', 'uml', 'ratio', 'crowsfoot']) {
   const [none, one, two] = [0, 1, 2].map(size);
   assert(groups.length === 2 && one.w > none.w && two.h > one.h && one.h > none.h, 'fks over a key: their lines have no room in the box');
 }
+// Indexes: a dim idx after the flags of a column with an index of its own, and an index (A, B) line under its table for
+// one over several, which the box makes room for; with the Indexes toggle off, neither
+{
+  const text = 'Owner\n  Id\nVisit\n  Id\n  AVeryLongPetIdentifierColumn index\n  Day\n  Room\n  Code unique\n  OwnerId -> Owner\n  index (Day, Room)\n';
+  for (const indexes of [true, false]) {
+    api.state.indexes = indexes;
+    for (const notation of ['arrows', 'crowsfoot']) sound(text, { notation, measured: true }, `indexes ${indexes ? 'shown' : 'hidden'} as ${notation}`);
+  }
+  const visit = model(text).find(t => t.name === 'Visit'), size = on => { api.state.indexes = on; return api.measureTable(visit); };
+  const [off, on] = [false, true].map(size);
+  assert.deepEqual([on.rows[1].flags, on.rows[1].idx, off.rows[1].flags, on.rows[4].flags], ['idx', true, '', 'unique'], 'idx is not where it belongs');
+  assert(on.w > off.w && on.h > off.h, 'indexes: idx and the index line have no room in the box');
+  assert.equal(api.footLines(visit).filter(f => f.index).map(f => f.label + ' ' + f.text).join(), 'index (Day, Room)');
+  api.state.indexes = false;
+  assert.equal(api.footLines(visit).filter(f => f.index).length, 0, 'an index line with the toggle off');
+  api.state.indexes = true;
+}
 // Random schemas, as the boxes of the tests and as the page measures them
 for (let seed = 1; seed <= FUZZ; seed++) {
   for (const options of [{}, { measured: true }, { measured: true, notation: 'crowsfoot' }, { measured: true, keysOnly: true, aspect: 0.8 }, { aspect: 2.25, notation: 'uml' }]) {

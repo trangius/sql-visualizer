@@ -10,7 +10,7 @@ module.exports = function load() {
   const geometry = diagram.slice(0, diagram.indexOf('// ─── Diagram rendering'));
   const edges = diagram.slice(diagram.indexOf('function diagramEdges('), diagram.indexOf('function dataBoxBody('));
   return new Function(`
-    const state = { dataView: false, keysOnly: false, notation: 'arrows' };
+    const state = { dataView: false, keysOnly: false, indexes: true, notation: 'arrows' };
     const canvas = { width: 1500, height: 1000 }, view = { tx: 0, ty: 0, s: 1 };
     const svg = { getBoundingClientRect: () => canvas };
     const document = { querySelector: () => null, createElement: () => ({ getContext: () => ({
@@ -24,7 +24,7 @@ module.exports = function load() {
     ${geometry}
     ${edges}
     ${read('layout')}
-    return { state, canvas, pos, parseText, resolve, markShown, shownCols, measureTable, ensurePositions,
+    return { state, canvas, pos, parseText, resolve, markShown, shownCols, measureTable, footLines, ensurePositions,
       arrangeAll, diagramEdges, routeEdges, simplify, EXAMPLES, AUTO, ROUTE };
   `)();
 };

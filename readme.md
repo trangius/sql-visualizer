@@ -56,10 +56,10 @@ Enrollment
 | `auto_increment` / `a_i` | The database numbers the rows itself. An integer `Id` gets this on its own. |
 | `pk (A, B)` | One primary key over several columns: only the combination must be unique. |
 | `unique (A, B)` | The combination of columns is unique. |
-| `index` | An index on the column, so searches and JOINs on it are fast. |
+| `index` | An index on the column, so searches and JOINs on it are fast. The SQL names it `IX_Table_Column`. |
 | `index (A, B)` | One index over several columns. |
 | `-> Table` | Foreign key to that table's primary key. The column takes its type. |
-| `-> Table.Col` | Foreign key to a specific primary key or unique column. |
+| `-> Table.Col` | Foreign key to a specific primary key or unique column. MariaDB also takes a column an `index` starts with. |
 | `[delete cascade]` | Last on a `->` line: deleting the referenced row deletes this row too. `[delete set null]` empties the column instead (it must be `null`); `[update cascade]` follows a changed key. |
 | `[default 0]` | The value when an INSERT leaves the column out: a number, `'text'`, `true`, `false` or `now`. Combine with commas: `[delete cascade, default 1]`. |
 | `# e.g. A, B` | After a column: the values its sample data uses (**Sample data**, and the SQL export with it). |

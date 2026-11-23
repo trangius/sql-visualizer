@@ -683,6 +683,21 @@ Route
   FromCountry -> City.Country
   ToCountry null -> City.Country
 `,
+  // an index says nothing of the values; a foreign key to a column an index begins with (MariaDB's) takes one that is there
+  'indexes': `Owner
+  Id
+  Email vc(100) index
+  Name
+  Phone vc(20)
+  index (Name, Phone)
+Pet
+  Id
+  Name
+  Born date index
+  OwnerEmail vc(100) -> Owner.Email
+  OwnerName null -> Owner.Name
+  index (OwnerName, Name)
+`,
 };
 // How many foreign keys over several columns the tables of some of them have
 const GROUPS = { 'combined keys': { Return: 1, Refund: 1 }, 'two fks to one key': { Route: 2 }, 'two fks to one key, interleaved': { Route: 2 } };

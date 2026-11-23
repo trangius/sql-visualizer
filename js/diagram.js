@@ -29,13 +29,17 @@ function displayType(c) {
   return m ? `varchar(${m[1] || DEFAULT_VC})${m[2]}` : t;
 }
 
-// In a key over several columns an FK keeps its FK badge: the key's dot shows it is part of the key
+// In a key over several columns an FK keeps its FK badge: the key's dot shows it is part of the key. With the
+// Indexes toggle on (state.indexes), a dim idx after the other flags: an index over the column alone (idx).
+const IDX = 'idx';
 function rowInfo(c, t) {
+  const idx = state.indexes && c.indexed;
   return {
     key: c.isPk && !(t.pkCols.length > 1 && c.ref) ? 'PK' : c.ref || c.implicit ? 'FK' : '',
     name: c.name,
     bold: c.isPk,
-    flags: [c.nullable && 'null', c.unique && 'unique', c.indexed && 'index'].filter(Boolean).join(' '),
+    flags: [c.nullable && 'null', c.unique && 'unique', idx && IDX].filter(Boolean).join(' '),
+    idx,
     type: displayType(c),
   };
 }
@@ -112,16 +116,19 @@ const keyDot = (g, k, j, y) =>
   `<path class="kdot" style="--h:${g.hue}" transform="translate(${dotX(j)},${y})" fill-rule="evenodd" d="${KEY_SYMBOLS[k % KEY_SYMBOLS.length]}"/>`;
 
 // Keys, foreign keys and indexes over several columns are listed below the rows: "unique (Name, Credits)",
-// "fk (OrderId, VariantId) -> ProductToOrder"
+// "fk (OrderId, VariantId) -> ProductToOrder", "index (Day, Room)" (with the Indexes toggle on)
 const FOOT_H = 22;
-// { label, text, cols, group, hue }: group is the key's dot column, null for a foreign key or an index;
-// hue the label's colour: a key's own, a foreign key's that of the key it points to (its FK badges')
+// { label, text, cols, group, hue, index }: group is the key's dot column, null for a foreign key or an index;
+// hue the label's colour: a key's own, a foreign key's that of the key it points to (its FK badges'). A key's line and
+// an index's start where the names do, an index's dim, with no dot and no colour.
 const footLines = t => [
   ...keyGroups(t).map((g, k) => ({ label: g.label, text: `(${g.cols.map(c => c.name).join(', ')})`, cols: g.cols.map(c => c.name), group: k, hue: g.hue })),
   ...(t.fkGroups ?? []).map(g => ({ label: 'fk', text: `(${g.cols.map(c => c.name).join(', ')}) -> ${g.target.name}`, cols: g.cols.map(c => c.name),
     group: null, hue: g.cols[0].keyHue })),
-  ...(t.multiIndexes ?? []).map(ix => ({ label: 'index', text: `(${ix.cols.join(', ')})`, cols: ix.cols, group: null, hue: null })),
+  ...(state.indexes ? t.multiIndexes ?? [] : []).map(ix => ({ label: 'index', text: `(${ix.cols.map(c => c.name).join(', ')})`, cols: ix.cols.map(c => c.name),
+    group: null, hue: null, index: true })),
 ];
+const atNames = f => f.group != null || f.index;
 const footLabelW = foot => Math.max(0, ...foot.map(f => textW(f.label + ' ', FONTS.flags)));
 const footTop = n => ROWS_TOP + Math.max(1, n) * ROW_H + 6;
 
@@ -176,7 +183,7 @@ function measureTable(t) {
   const w = Math.max(MIN_W, textW(t.name, FONTS.head) + 2 * PAD_X + 12, ...rows.map(r =>
     PAD_X + lead + BADGE_W + GAP + textW(r.name, r.bold ? FONTS.pk : FONTS.name) + 16 +
     (r.flags ? textW(r.flags, FONTS.flags) + 6 : 0) + textW(r.type, FONTS.type) + PAD_X),
-    ...foot.map(f => (f.group != null ? PAD_X + BADGE_W + GAP + lead : PAD_X) + labelW + textW(f.text, FONTS.type) + PAD_X));
+    ...foot.map(f => (atNames(f) ? PAD_X + BADGE_W + GAP + lead : PAD_X) + labelW + textW(f.text, FONTS.type) + PAD_X));
   const h = footTop(rows.length) + (foot.length ? foot.length * FOOT_H + 6 : 0);
   return { w: Math.ceil(w / 10) * 10, h, rows };
 }
@@ -1188,6 +1195,7 @@ text { dominant-baseline: central; }
 .keyline .hit { fill: transparent; }
 .keyline:hover .hit, .row.kh .hit { fill: var(--row-hover, #f5efe2); }
 .flags { font: ${FONTS.flags}; fill: var(--tok-flag, #6e3a2e); }
+.flags .idx, .flags.idx { fill: var(--faint, #8a7e60); }
 .type { font: ${FONTS.type}; fill: var(--muted, #5e5440); }
 .row.bad .name, .row.bad .key { fill: var(--err, #7a2e22); }
 .dhead { font: ${FONT_DHEAD}; fill: var(--muted, #5e5440); }
@@ -1366,8 +1374,8 @@ function boxMarkup(t, b, interactive) {
     s += `<text class="name" x="${nx}" y="${y}">${esc(row.name)}</text>`;
     s += `<text class="type" x="${w - PAD_X}" y="${y}" text-anchor="end">${esc(row.type)}</text>`;
     if (row.flags) {
-      const fx = w - PAD_X - textW(row.type, FONTS.type) - 6;
-      s += `<text class="flags" x="${fx}" y="${y}" text-anchor="end">${row.flags}</text>`;
+      const fx = w - PAD_X - textW(row.type, FONTS.type) - 6, rest = row.idx ? row.flags.slice(0, -IDX.length) : row.flags;
+      s += `<text class="flags" x="${fx}" y="${y}" text-anchor="end">${rest}${row.idx ? `<tspan class="idx">${IDX}</tspan>` : ''}</text>`;
     }
     s += '</g>';
   });
@@ -1380,8 +1388,8 @@ function boxMarkup(t, b, interactive) {
     s += `<g class="keyline" data-cols="${esc(f.cols.map(n => t.name + '.' + n).join('\n'))}">`;
     if (interactive) s += `<rect class="hit" x="1" y="${y - FOOT_H / 2}" width="${w - 2}" height="${FOOT_H}"/>`;
     if (f.group != null) s += keyDot(groups[f.group], f.group, slots - 1, y);
-    const lx = f.group != null ? nx : PAD_X;
-    s += `<text class="flags"${f.hue != null ? ` style="fill:oklch(var(--key-l, .55) var(--key-c, .15) ${f.hue})"` : ''} x="${lx}" y="${y}">${f.label}</text>` +
+    const lx = atNames(f) ? nx : PAD_X;
+    s += `<text class="flags${f.index ? ' idx' : ''}"${f.hue != null ? ` style="fill:oklch(var(--key-l, .55) var(--key-c, .15) ${f.hue})"` : ''} x="${lx}" y="${y}">${f.label}</text>` +
       `<text class="type" x="${lx + labelW}" y="${y}">${esc(f.text)}</text></g>`;
   });
   s += `<rect class="outline" x=".5" y=".5" width="${w - 1}" height="${h - 1}" rx="${r - .5}"/></g>`;

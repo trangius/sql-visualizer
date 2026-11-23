@@ -90,18 +90,22 @@ function clipUtf8(s, max) {
   return out;
 }
 
-// A constraint's name: PK_table, UQ_table_column, FK_table_column, numbered from _2 and cut to `max` bytes
+// A constraint's or an index's name: PK_table, UQ_table_column, FK_table_column, IX_table_column (over several columns
+// they all, with _ between), numbered from _2 and cut to `max` bytes
+const NAME_PREFIXES = { unique: 'UQ', fk: 'FK', index: 'IX' };
 function givenName(kind, table, column, number, max) {
-  const base = kind === 'pk' ? `PK_${table}` : `${kind === 'unique' ? 'UQ' : 'FK'}_${table}_${column}`, suffix = number ? '_' + (number + 1) : '';
+  const base = kind === 'pk' ? `PK_${table}` : `${NAME_PREFIXES[kind]}_${table}_${column}`, suffix = number ? '_' + (number + 1) : '';
   return clipUtf8(base, max - utf8Length(suffix)) + suffix;
 }
-// MariaDB's own: PRIMARY, a unique key named after its column (numbered from _2), a foreign key given its name
+// MariaDB's own: PRIMARY, a unique key named after its first column (numbered from _2); a foreign key and an index
+// given their names
 const mariadbName = (kind, table, column, number, max) => kind === 'pk' ? 'PRIMARY'
   : kind === 'unique' ? (number ? clipUtf8(column, max - utf8Length('_' + (number + 1))) + '_' + (number + 1) : column)
   : givenName(kind, table, column, number, max);
 // PostgreSQL's own: table_column_fkey (table_pkey, table_column_key), the longer name cut first until it fits,
-// then numbered fkey1, fkey2…
+// then numbered fkey1, fkey2…; an index given its name
 function postgresName(kind, table, column, number, max) {
+  if (kind === 'index') return givenName(kind, table, column, number, max);
   const label = { pk: 'pkey', unique: 'key', fk: 'fkey' }[kind] + (number || ''), second = kind === 'pk' ? '' : column;
   const room = max - utf8Length(label) - 1 - (second ? 1 : 0);
   let a = utf8Length(table), b = utf8Length(second);
@@ -111,11 +115,13 @@ function postgresName(kind, table, column, number, max) {
 
 // Takes each constraint's name in turn, as the script makes them: { name, sql } with sql "CONSTRAINT name "
 // for one the database wouldn't give that name itself (D.names.own), "" otherwise. A name already taken where
-// it must be unique (D.names.scope: per table, or for the whole schema) gets the next number.
+// it must be unique (D.names.scope: per table, or for the whole schema; one name taken there is taken for every
+// kind) gets the next number. An index's name ('index') is D.indexNames' where the database's constraints have none.
 function constraintNamer(D) {
-  const N = D.names, taken = new Set();
-  if (!N) return () => ({ name: null, sql: '' });
+  const taken = new Set();
   return (kind, table, column = '') => {
+    const N = kind === 'index' ? D.names ?? D.indexNames : D.names;
+    if (!N) return { name: null, sql: '' };
     const key = name => { const k = (N.scope[kind] === 'table' ? table : '') + '\u0000' + name; return N.exact ? k : k.toLowerCase(); };
     let name;
     for (let n = 0; ; n++) {
@@ -143,14 +149,6 @@ function topoOrder(tables) {
   const cyclic = out.length < tables.length;
   for (const t of tables) if (!done.has(t)) out.push(t);
   return { order: out, cyclic };
-}
-
-// A name the database takes: a longer one is cut, with a hash of the whole to keep it unique
-function shortName(n, max) {
-  if (n.length <= max) return n;
-  let h = 0;
-  for (const ch of n) h = (h * 31 + ch.codePointAt(0)) >>> 0;
-  return n.slice(0, max - 7) + '_' + h.toString(36).padStart(6, '0').slice(-6);
 }
 
 const isBoolType = t => /^(bool|boolean|bit)\b/.test(t);
@@ -185,34 +183,37 @@ const column = (c, w, Q, type, rest) => `  ${Q(c.name).padEnd(w)} ${type}${rest}
 const nullSQL = c => c.nullable ? ' NULL' : ' NOT NULL';
 const colWidth = (t, Q) => Math.max(...t.cols.map(c => Q(c.name).length));
 
-// The table's indexes, [{ name, cols }], with names not in `taken` (which it adds to)
-function namedIndexes(t, taken, D) {
-  return (t.indexes ?? []).filter(ix => ix.cols.every(n => t.cols.some(c => c.name === n))).map(ix => {
-    const base = shortName(ix.name ?? indexName(t.name, ix.cols), D.maxName);
-    let name = base;
-    for (let i = 2; taken.has(name.toLowerCase()); i++) name = base.slice(0, D.maxName - 1 - String(i).length) + '_' + i;
-    taken.add(name.toLowerCase());
-    return { name, cols: ix.cols };
-  });
-}
-const createIndexes = (t, taken, D) => namedIndexes(t, taken, D).map(ix =>
-  `CREATE INDEX ${D.q(ix.name)} ON ${tableSQL(D, t.name)} (${ix.cols.map(D.q).join(', ')});`);
-
 const tablesOf = tables => topoOrder(tables.filter(t => t.cols.length));
-// an arrow to the primary key or a unique column, or one of the arrows to a key over several columns
-const isKey = c => pointsToPk(c) || c.targetCol.unique || !!c.fkGroup;
 const links = tables => tables.flatMap(t => t.cols.filter(c => c.target && !c.implicit).map(c => ({ t, c })));
 const foreignKeys = tables => links(tables).filter(({ c }) => leadsFk(c)); // the arrows of a group as one
 
 // ─── What the databases refuse ───────────────────────────────────────────────
 
-const keyProblems = (tables, db) => links(tables).filter(({ c }) => !isKey(c)).map(({ c }) =>
-  problem(c.line, `${db} needs ${c.target.name}.${c.targetCol.name} to be the primary key or unique`));
+// A foreign key to a column that is no key but begins one over several columns or an index (resolve says so of
+// it, and of one to a column that begins none): where the database points none so (!D.pointsAtIndexes), in jaidb's words
+const indexKeyProblems = (tables, D) => D.pointsAtIndexes ? [] : links(tables)
+  .filter(({ c }) => !pointsAtKey(c) && beginsKey(c.target, c.targetCol, true)).map(({ c }) =>
+    problem(c.line, `${D.name} points no foreign key at ${c.target.name}.${c.targetCol.name}, which is no key: make it the primary key or unique`));
 
-// Columns in a key or index of a type the database can't key (isLob: TEXT, BLOB…)
-const keyedCol = (t, c) => c.isPk || c.unique || t.multiUniques.some(u => u.cols.includes(c)) || t.indexes?.some(ix => ix.cols.includes(c.name));
-const lobKeyProblems = (tables, isLob, db) => tables.flatMap(t => t.cols.filter(c => keyedCol(t, c) && isLob(c.effType)).map(c =>
-  problem(c.line, `${db} can't make a key or index of ${c.name} (${c.effType}). Use vc instead.`)));
+// A key over a column of a type no key of its kind may be over, or too large for one (keyable): its primary key, its
+// UNIQUE, a unique key over several columns, an index (keyed as a primary key is), as jaidb's schema_engine_problems
+// says it. `fits(type, primary)` and `kind(type, unique)` (whether no size fits) stand in for keyable where the
+// database's types are its own (Oracle's).
+function keyOverProblems(tables, D, fits = (t, primary) => keyable(t, D, primary),
+  kind = (t, unique) => { const { base } = typeParts(t); return (D.unkeyable ?? []).includes(base) || (!unique && (D.unprimary ?? []).includes(base)); }) {
+  const problems = [];
+  for (const t of tables) {
+    for (const c of t.cols) {
+      const unique = c.unique || t.multiUniques.some(u => u.cols.includes(c)), indexed = t.idxs.some(ix => ix.cols.includes(c));
+      const refused = c.isPk && !fits(c.effType, true) ? 'a primary key' : unique && !fits(c.effType, false) ? 'a unique key'
+        : indexed && !fits(c.effType, true) ? 'an index' : null;
+      if (!refused) continue;
+      const whole = kind(c.effType, refused === 'a unique key');
+      problems.push(problem(c.line, `${D.name} can't make ${refused} over ${c.name} (${c.effType}). Use ${whole ? '' : 'a shorter '}varchar(n)${whole ? ' instead' : ''}`));
+    }
+  }
+  return problems;
+}
 
 // A foreign key's two sides must be of types that fit: fits(its column's type, the one it points at), else `why`
 // ends the problem; unlinkable(type): no foreign key may be over the type at all
@@ -289,29 +290,45 @@ function typeSQL(t, D) {
   if (unsigned && row[1]) return row[1];
   return row[2] === 'sized' && args != null ? row[0] + sqlType(signless(t.slice(base.length))) : row[0];
 }
-// Whether a key or unique key may be over a column of the type there (D.unkeyable)
-function keyable(t, D) {
-  let { base, args } = typeParts(t);
+// Whether a unique key may be over a column of the type there, or where `primary` a primary key, a foreign key or an
+// index, as jaidb's p_type_keyable says: keyed as the type that stands in for it past its size limit, or where the
+// database hasn't it, which no key may be over (D.unkeyable), nor take more of a key's bytes than D.keyBytes (a
+// column of D.keyPartBytes' types: { type: [bytes a unit of its size, its size when none is written] }); where
+// `primary`, none of D.unprimary's types (a unique key over one is hashed), nor past D.primarySizeLimits' size.
+const typeSize = (t, d) => { const a = typeParts(t).args; return a != null && /^\d/.test(a) ? parseInt(a) : d; };
+function keyable(t, D, primary = false) {
+  let { base, args } = typeParts(t), sized = t;
   const limit = D.sizeLimits?.[base];
   if (limit && args != null && +args > limit[0]) base = typeParts(limit[1].replace('%', args)).base;
-  if (TYPE_FALLBACKS[base] && !hasType(base, D)) base = typeParts(TYPE_FALLBACKS[base].at(-1)).base;
-  return !(D.unkeyable ?? []).includes(base);
+  if (TYPE_FALLBACKS[base] && !hasType(base, D)) { sized = TYPE_FALLBACKS[base].at(-1); base = typeParts(sized).base; }
+  if ((D.unkeyable ?? []).includes(base)) return false;
+  const part = D.keyPartBytes?.[base];
+  if (D.keyBytes && part && part[0] * typeSize(sized, part[1]) > D.keyBytes) return false;
+  if (!primary) return true;
+  return !(D.unprimary ?? []).includes(base) && !(typeSize(t, DEFAULT_VC) > (D.primarySizeLimits?.[base] ?? Infinity));
 }
 const TEXT_TYPES = ['text', 'tinytext', 'mediumtext', 'longtext'], BLOB_TYPES = ['blob', 'tinyblob', 'mediumblob', 'longblob'];
 const typeRows = (names, row) => Object.fromEntries(names.map(n => [n, row]));
 const SPATIAL = ['geometry', 'point', 'linestring', 'polygon'];
 
 // MariaDB: as written, but REAL is DOUBLE, and CHAR and BINARY hold 255 at most. UUID, INET6 and INET4 are its
-// own from 10.7, 10.5 and 10.10: with no version known, text that holds one.
+// own from 10.7, 10.5 and 10.10: with no version known, text that holds one. A unique key over TEXT, BLOB, a
+// geometry, a linestring or a polygon is hashed; no primary key nor index may be over one, nor over more than 3072
+// bytes (768 characters), as jaidb has it (the server itself makes an index over TEXT one over its first 768 characters,
+// which the text can't say).
 const MARIADB_TYPES = { real: ['DOUBLE'] };
 const MARIADB_NATIVE = [...SPATIAL, 'enum', 'set'];
 const MARIADB_SIZE_LIMITS = { char: [255, 'vc(%)'], binary: [255, 'varbinary(%)'] };
+const MARIADB_UNPRIMARY = [...TEXT_TYPES, ...BLOB_TYPES, 'geometry', 'linestring', 'polygon'];
+const MARIADB_PRIMARY_SIZES = { vc: 768, char: 768, varbinary: 3072, binary: 3072 };
 // A foreign key joins numbers of one type and sign, and strings, binaries, decimals and times of any size
 const MARIADB_KEY_KINDS = { VARCHAR: 'string', CHAR: 'string', VARBINARY: 'binary', BINARY: 'binary', DATETIME: 'datetime', TIMESTAMP: 'datetime',
   TINYINT: 'tinyint', BOOL: 'tinyint' };
-// MySQL: no UUID nor INET; no key over TEXT, BLOB, JSON or a spatial type
+// MySQL: no UUID nor INET; no key over TEXT, BLOB, JSON or a spatial type, and none over more than 3072 bytes (a
+// character takes 4)
 const MYSQL_NATIVE = ['json', ...SPATIAL, 'enum', 'set'];
 const MYSQL_UNKEYABLE = [...TEXT_TYPES, ...BLOB_TYPES, 'json', ...SPATIAL];
+const MYSQL_KEY_PARTS = { vc: [4, DEFAULT_VC], char: [4, 1], varbinary: [1, 1], binary: [1, 1] };
 
 // SQLite takes any type name and only uses it as a hint, but every integer is INTEGER (only an INTEGER PRIMARY KEY
 // numbers its rows), and an enum or a set, whose list it can't take, is a vc (with a CHECK here).
@@ -346,13 +363,15 @@ const isMax = t => /\(MAX\)/.test(mssqlType(t));
 
 // ─── The script ──────────────────────────────────────────────────────────────
 // One for every database, as jaidb's generate_schema_sql writes it, with what differs in DIALECTS: tables in
-// key order, each with its columns (type, NULL, numbering, DEFAULT, UNIQUE), its primary key and its foreign
-// keys; a key to a table made later is added after it (where D.fkInline, as SQLite's are, it goes in the table
-// all the same). Before them the tables are dropped, after them their indexes made.
+// key order, each with its columns (type, NULL, numbering, DEFAULT, UNIQUE), its primary key, its unique keys over
+// several columns, its indexes and its foreign keys; a key to a table made later is added after it (where D.fkInline,
+// as SQLite's are, it goes in the table all the same). An index is in CREATE TABLE where D.inlineIndexes (MariaDB's
+// and MySQL's, so that a foreign key that may use it makes none of its own), else made right after its table. Before
+// them the tables are dropped.
 
-// The names the constraints take, table by table, in the order the script makes them
+// The names the constraints and indexes take, table by table, in the order the script makes them
 function constraintNames(order, D) {
-  const take = constraintNamer(D), names = new Map();
+  const take = constraintNamer(D), names = new Map(), skip = D.skipIndexes?.(order) ?? new Set();
   const pointedTo = new Set(order.flatMap(t => t.cols.filter(c => c.target).map(c => c.targetCol)));
   // where D.nullUniqueIndex, a unique key that may be null is a unique index of the rows where it isn't:
   // SQL Server's UNIQUE allows one NULL only. An FK may only point to a constraint, so one pointed to stays one.
@@ -370,33 +389,15 @@ function constraintNames(order, D) {
     }
     const pk = t.pkCols.length && !rowid ? take('pk', t.name) : null;
     for (const u of t.multiUniques) (isIndex(u.cols) ? indexes : multi).push({ cols: u.cols, ...take('unique', t.name, u.cols.map(c => c.name).join('_')) });
+    const plain = t.idxs.filter(ix => !skip.has(ix)).map(ix => ({ cols: ix.cols, ...take('index', t.name, ix.cols.map(c => c.name).join('_')) }));
     const fks = t.cols.filter(c => c.target && leadsFk(c)).map(c =>
       ({ c, later: !created.has(c.target) && !D.fkInline, ...take('fk', t.name, fkCols(c).cols.map(c => c.name).join('_')) }));
-    names.set(t, { rowid, unique, indexes, pk, multi, fks });
+    names.set(t, { rowid, unique, indexes, pk, multi, plain, fks });
   }
   return names;
 }
 // The foreign keys added after their tables: [{ t, c, name }]
 const laterKeys = (order, D) => [...constraintNames(order, D)].flatMap(([t, n]) => n.fks.filter(k => k.later).map(k => ({ t, ...k })));
-
-// MariaDB needs an index on the column a foreign key points to. True when a key or index already starts with it.
-function hasIndex(t, c) {
-  return c.unique || t.pkCols[0] === c || t.multiUniques.some(u => u.cols[0] === c) ||
-    (t.indexes ?? []).some(ix => ix.cols[0]?.toLowerCase() === c.name.toLowerCase());
-}
-// Where D.inlineIndexes (MariaDB) the indexes go inside CREATE TABLE: one a foreign key needs must be there
-// before the key is made
-function inlineIndexes(t, tables, D) {
-  // names MariaDB gives the indexes it makes itself: a UNIQUE or FOREIGN KEY one is named after its first column
-  const taken = new Set(['primary', ...t.cols.filter(c => c.unique || c.target).map(c => c.name.toLowerCase()),
-    ...t.multiUniques.map(u => u.cols[0].name.toLowerCase())]);
-  // a key over several columns the arrows of a group point to is that index already
-  const pointedTo = new Set(tables.flatMap(o => o.cols.filter(c => c.target === t && !c.fkGroup).map(c => c.targetCol)));
-  const needed = t.cols.filter(c => pointedTo.has(c) && !hasIndex(t, c))
-    .map(c => ({ name: shortName(indexName(t.name, [c.name]), D.maxName), cols: [c.name] }));
-  for (const ix of needed) taken.add(ix.name.toLowerCase());
-  return [...namedIndexes(t, taken, D), ...needed].map(ix => `  INDEX ${D.q(ix.name)} (${ix.cols.map(D.q).join(', ')})`);
-}
 
 function genSchema(tables, D) {
   const Q = D.q, T = n => tableSQL(D, n);
@@ -408,7 +409,7 @@ function genSchema(tables, D) {
   // where D.dropKey, the keys added after their tables go first, or the tables they join can't be dropped
   if (D.dropKey) out.push(...laterKeys(order, D).map(({ t, name }) => D.dropKey(T(t.name), Q(name))));
   out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${T(t.name)}${D.dropTail ? ' ' + D.dropTail : ''};`), '');
-  const deferred = [], indexTaken = new Set();
+  const deferred = [];
   for (const t of order) {
     const n = names.get(t), w = colWidth(t, Q);
     const defs = t.cols.map(c => {
@@ -419,54 +420,37 @@ function genSchema(tables, D) {
       return column(c, w, Q, D.type ? D.type(c.effType) : typeSQL(c.effType, D), rest);
     });
     if (n.pk) defs.push(`  ${n.pk.sql}PRIMARY KEY (${keyList(t.pkCols, Q)})`);
-    for (const ix of n.indexes) { // after the table, with the keys added later
-      indexTaken.add(ix.name.toLowerCase());
+    for (const ix of n.indexes) { // after the tables, with the keys added later
       deferred.push(`CREATE UNIQUE INDEX ${Q(ix.name)} ON ${T(t.name)} (${keyList(ix.cols, Q)}) WHERE ${ix.cols.map(c => Q(c.name) + ' IS NOT NULL').join(' AND ')};`);
     }
     for (const u of n.multi) defs.push(`  ${u.sql}UNIQUE (${keyList(u.cols, Q)})`);
-    if (D.inlineIndexes) defs.push(...inlineIndexes(t, tables, D));
+    if (D.inlineIndexes) defs.push(...n.plain.map(ix => `  INDEX ${Q(ix.name)} (${keyList(ix.cols, Q)})`));
     for (const k of n.fks) {
       if (k.later) deferred.push(`ALTER TABLE ${T(t.name)} ADD ${fkSQL(k.c, D, k.sql)}${D.deferredTail ?? ''};`);
       else defs.push('  ' + fkSQL(k.c, D, k.sql));
     }
-    out.push(`CREATE TABLE ${T(t.name)} (\n${defs.join(',\n')}\n);`, '');
+    out.push(`CREATE TABLE ${T(t.name)} (\n${defs.join(',\n')}\n);`);
+    if (!D.inlineIndexes) out.push(...n.plain.map(ix => `CREATE INDEX ${Q(ix.name)} ON ${T(t.name)} (${keyList(ix.cols, Q)});`));
+    out.push('');
   }
   if (deferred.length) out.push(...deferred, '');
-  if (!D.inlineIndexes) { // an index name is for the whole schema
-    const skip = D.skipIndexes?.(tables) ?? new Set();
-    const indexes = order.flatMap(t => createIndexes({ ...t, indexes: (t.indexes ?? []).filter(ix => !skip.has(ix)) }, indexTaken, D));
-    if (indexes.length) out.push(...indexes, '');
-  }
   if (cyclic && D.keysOn) out.push(D.keysOn, '');
   return out.join('\n');
 }
 
-function mariadbProblems(tables) {
-  const problems = links(tables).filter(({ c }) => !isKey(c)).map(({ c }) => problem(c.line,
-    `${c.target.name}.${c.targetCol.name} is neither the primary key nor unique. The SQL adds an index on it, but normally it should be unique.`, 'warn'));
-  return [...problems, ...keyTypeProblems(tables, DIALECTS.mariadb, isLobType)];
-}
+// MariaDB and MySQL can't make a key of TEXT or BLOB, nor a primary key or an index past 3072 bytes (768
+// characters); MySQL 8.4 points a foreign key only at a key, and no key of its takes more than 3072 bytes
 const isLobType = t => /(text|blob)$|^json$/.test(typeParts(t).base);
+const mariadbProblems = tables => [...indexKeyProblems(tables, DIALECTS.mariadb), ...keyOverProblems(tables, DIALECTS.mariadb),
+  ...keyTypeProblems(tables, DIALECTS.mariadb, isLobType)];
+const mysqlProblems = tables => [...indexKeyProblems(tables, DIALECTS.mysql), ...keyOverProblems(tables, DIALECTS.mysql),
+  ...keyTypeProblems(tables, DIALECTS.mysql, isLobType)];
 
-// MySQL 8.4 only links to a key, can't make a key of TEXT, and a key is at most 3072 bytes (768 characters)
-function mysqlProblems(tables) {
-  const problems = [...keyProblems(tables, 'MySQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mysql), 'MySQL'), ...keyTypeProblems(tables, DIALECTS.mysql, isLobType)];
-  for (const t of tables) {
-    for (const c of t.cols) {
-      const { base, args } = typeParts(c.effType);
-      if (keyedCol(t, c) && /^(vc|varchar|char)$/.test(base) && +(args ?? DEFAULT_VC) > 768) {
-        problems.push(problem(c.line, `MySQL keys are at most 768 characters, and ${c.name} can hold ${args}. Use a shorter vc.`));
-      }
-    }
-  }
-  return problems;
-}
-
-const postgresProblems = tables => [...keyProblems(tables, 'PostgreSQL'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.postgres), 'PostgreSQL'),
+const postgresProblems = tables => [...indexKeyProblems(tables, DIALECTS.postgres), ...keyOverProblems(tables, DIALECTS.postgres),
   ...keyTypeProblems(tables, DIALECTS.postgres)];
 
 function mssqlProblems(tables) {
-  const problems = [...keyProblems(tables, 'SQL Server'), ...lobKeyProblems(tables, t => !keyable(t, DIALECTS.mssql), 'SQL Server'),
+  const problems = [...indexKeyProblems(tables, DIALECTS.mssql), ...keyOverProblems(tables, DIALECTS.mssql),
     ...keyTypeProblems(tables, DIALECTS.mssql, isMax)];
   for (const t of tables) {
     for (const c of t.cols) {
@@ -526,16 +510,15 @@ const isClob = t => /^(CLOB|BLOB|JSON)$/.test(oracleType(t));
 function oracleSkipIndexes(tables) {
   const skip = new Set();
   for (const t of tables) {
-    const keyed = [t.pkCols, ...t.multiUniques.map(u => u.cols), ...t.cols.filter(c => c.unique).map(c => [c])]
-      .map(cols => cols.map(c => c.name.toLowerCase()).join());
-    for (const ix of t.indexes ?? []) if (keyed.includes(ix.cols.map(n => n.toLowerCase()).join())) skip.add(ix);
+    const keyed = [t.pkCols, ...t.multiUniques.map(u => u.cols), ...t.cols.filter(c => c.unique).map(c => [c])];
+    for (const ix of t.idxs) if (keyed.some(cols => sameCols(cols, ix.cols))) skip.add(ix);
   }
   return skip;
 }
 
 function oracleProblems(tables) {
   const family = t => oracleType(t).replace(/\(.*\)/, ''); // lengths may differ, CHAR and VARCHAR2 may not
-  return [...keyProblems(tables, 'Oracle'), ...lobKeyProblems(tables, isClob, 'Oracle'),
+  return [...indexKeyProblems(tables, DIALECTS.oracle), ...keyOverProblems(tables, DIALECTS.oracle, t => !isClob(t), () => true),
     ...linkTypeProblems(tables, isClob, (a, b) => family(a) === family(b), ". Oracle can't link them."),
     ...links(tables).filter(({ c }) => c.onUpdate).map(({ c }) =>
       problem(c.line, `Oracle has no [update ${c.onUpdate}]: a key isn't meant to change there. Leave it out.`))];
@@ -544,7 +527,9 @@ function oracleProblems(tables) {
 // ─── The databases ───────────────────────────────────────────────────────────
 // dqIdent: "x" is a name, not a string. backslash: \ escapes in strings.
 // The script (genSchema): q quotes a name, schema is the default one tables are named in, type(t) or
-// types/native/sizeLimits/varchar/signWords give a column's type (typeSQL), unkeyable the types no key is over, names says how constraints are named (constraintNamer),
+// types/native/sizeLimits/varchar/signWords give a column's type (typeSQL), unkeyable, unprimary, primarySizeLimits,
+// keyBytes and keyPartBytes the types and sizes a key is over (keyable), pointsAtIndexes: a foreign key may point at a
+// column an index begins with, names (indexNames) says how constraints (indexes) are named (constraintNamer),
 // autoSQL numbers a column, noActions are the foreign key actions left unsaid. keysAtStart(cyclic), keysOff and
 // keysOn turn the foreign key checks off around a cycle; dropKey(table, name) drops a key before its table,
 // dropTail ends DROP TABLE. fkInline: keys to tables made later go in the table too. numberingIsKey: the
@@ -557,7 +542,7 @@ function oracleProblems(tables) {
 
 const sqlStr = s => `'${s.replace(/'/g, "''")}'`;
 const upperBool = b => b ? 'TRUE' : 'FALSE';
-const givenNames = (max, scope) => ({ name: givenName, own: [], scope: { pk: scope, unique: scope, fk: scope }, max });
+const givenNames = (max, scope, index) => ({ name: givenName, own: [], scope: { pk: scope, unique: scope, fk: scope, index }, max });
 // What most of them have in common; each one says what differs
 const COMMON = {
   maxName: 64, dqIdent: true, backslash: false, str: sqlStr, bool: upperBool, today: 'CURRENT_DATE',
@@ -567,7 +552,8 @@ const MARIADB = {
   ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true,
   types: MARIADB_TYPES, native: MARIADB_NATIVE, sizeLimits: MARIADB_SIZE_LIMITS, varchar: 'VARCHAR', signWords: true,
   keyLengthsMayDiffer: true, keyTypeKinds: MARIADB_KEY_KINDS, keyTypesNeeded: 'of one type and sign, their sizes aside',
-  names: { name: mariadbName, own: ['pk', 'unique'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema' }, max: 64 },
+  unprimary: MARIADB_UNPRIMARY, primarySizeLimits: MARIADB_PRIMARY_SIZES, pointsAtIndexes: true,
+  names: { name: mariadbName, own: ['pk', 'unique'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema', index: 'table' }, max: 64 },
   autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, enumCheck: false,
   keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
   problems: mariadbProblems, str: s => sqlStr(s.replace(/\\/g, '\\\\')),
@@ -580,15 +566,17 @@ const DIALECTS = {
   mariadb: MARIADB,
   mysql: {
     ...MARIADB, name: 'MySQL', q: quoter(MYSQL_RESERVED, '`'), problems: mysqlProblems, native: MYSQL_NATIVE, unkeyable: MYSQL_UNKEYABLE,
+    keyBytes: 3072, keyPartBytes: MYSQL_KEY_PARTS,
+    pointsAtIndexes: false, // 8.4 refuses a foreign key to what is no key; with no version known, so do they all
     // a default other than a plain value, or on TEXT, BLOB or JSON, is an expression in parentheses
     defaultFor: (c, v) => v === 'CURRENT_DATE' || isLobType(c.effType) ? `(${v})` : v,
   },
   sqlite: {
     ...COMMON, name: 'SQLite', q: quoter(SQLITE_KEYWORDS, '"'), types: SQLITE_TYPES, varchar: 'VARCHAR',
-    native: SQLITE_NATIVE, names: givenNames(Infinity, 'table'),
+    native: SQLITE_NATIVE, names: givenNames(Infinity, 'table', 'schema'), maxName: Infinity, // a name may be any length
     autoSQL: ' PRIMARY KEY AUTOINCREMENT', numberingIsKey: true, fkInline: true, // tables may point to tables made later
     keysAtStart: cyclic => [cyclic ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;'], keysOn: 'PRAGMA foreign_keys = ON;',
-    problems: tables => keyProblems(tables, 'SQLite'), // SQLite doesn't compare the types
+    problems: tables => [...indexKeyProblems(tables, DIALECTS.sqlite), ...keyOverProblems(tables, DIALECTS.sqlite)], // SQLite doesn't compare the types
     dataStart: () => ['PRAGMA foreign_keys = OFF;'], dataEnd: () => ['PRAGMA foreign_keys = ON;'],
   },
   postgres: {
@@ -596,7 +584,7 @@ const DIALECTS = {
     types: PG_TYPES, native: PG_NATIVE, varchar: 'VARCHAR', unkeyable: ['json', 'point', 'polygon', 'xml'],
     keyLengthsMayDiffer: true, keyTypeKinds: PG_KEY_KINDS, keyTypeWidenings: PG_KEY_WIDENINGS,
     keyTypesNeeded: "of one kind, or the first of a type it converts to the second's by itself",
-    names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema' }, max: 63, exact: true },
+    names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema', index: 'schema' }, max: 63, exact: true },
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', dropTail: 'CASCADE', problems: postgresProblems,
     bool: (b, c) => c && /^bit\b/.test(c.effType) ? `B'${b ? 1 : 0}'` : upperBool(b),
     // one transaction, with the keys to tables made later checked at COMMIT, so the rows can go in in any order;
@@ -610,7 +598,7 @@ const DIALECTS = {
   mssql: {
     ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', maxName: 128, nPrefix: true,
     types: MSSQL_TYPES, native: ['geometry', 'money', 'xml', 'rowversion'], sizeLimits: MSSQL_SIZE_LIMITS, varchar: 'NVARCHAR',
-    unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema'),
+    unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema', 'table'),
     defaultFraction: { size: '(7)', types: ['TIME', 'DATETIMEOFFSET', 'DATETIME2'] }, keyTypesNeeded: 'of the same type and size',
     autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
     dropKey: (T, name) => `IF OBJECT_ID(N'${T}', N'U') IS NOT NULL ALTER TABLE ${T} DROP CONSTRAINT IF EXISTS ${name};`,
@@ -622,7 +610,7 @@ const DIALECTS = {
     dataTable: t => t.cols.some(c => c.autoInc) ? [[`SET IDENTITY_INSERT ${tableSQL(DIALECTS.mssql, t.name)} ON;`], [`SET IDENTITY_INSERT ${tableSQL(DIALECTS.mssql, t.name)} OFF;`]] : [[], []],
   },
   oracle: {
-    ...COMMON, name: 'Oracle', q: quoter(ORACLE_RESERVED, '"'), maxName: 128,
+    ...COMMON, name: 'Oracle', q: quoter(ORACLE_RESERVED, '"'), maxName: 128, indexNames: givenNames(128, 'schema', 'schema'),
     type: oracleType, problems: oracleProblems, dropTail: 'CASCADE CONSTRAINTS', defaultFirst: true, skipIndexes: oracleSkipIndexes,
     // the identity says the rest; a key to a table made later is checked at COMMIT, so sample rows can go in in any order
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', autoAlone: true, deferredTail: ' DEFERRABLE INITIALLY DEFERRED',

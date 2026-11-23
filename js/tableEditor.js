@@ -12,12 +12,17 @@ const MOVE_KEYS = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? n
 // the column's yes/no options, as pills: [field, label]
 const FLAGS = [['pk', 'PK'], ['nullable', 'NULL'], ['unique', 'UNIQUE'], ['auto', 'AUTO']];
 
-const dlgEl = $('#tableDlg'), tdName = $('#tdName'), tdCols = $('#tdCols');
+const dlgEl = $('#tableDlg'), tdName = $('#tdName'), tdCols = $('#tdCols'), tdIdx = $('#tdIdx');
 $('#typeList').innerHTML = TYPE_SUGGESTIONS.map(t => `<option value="${t}">`).join('');
 
-// dlg: { orig, at, nameComment, tables, fk, start, cols: [{ name, origName, type, pk, nullable, unique, auto, ref, refCol, comment }] }
+// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, pk, nullable, unique, auto, ref, refCol, comment }],
+//        ixs: [{ chips: [{ col } | { written }], unique, comment }] }
 // dlg.fk: the open foreign-key chooser { row, table, usePk, col, filter }
 // dlg.start: the dialog as it opened (see snapshot), to tell whether closing loses anything
+// dlg.tab: the tab shown, 'cols' or 'idx'
+// dlg.ixs: the Indexes tab's rows, unique keys and indexes: the columns' UNIQUEs, then the unique (…) lines, then the
+// indexes, each over its columns in order, a chip each: one of dlg.cols (col), or a name that is no column of the table,
+// kept as written for the text to report. A UNIQUE row over one column is that column's UNIQUE on the Columns tab.
 let dlg = null;
 
 const blankCol = () => ({ name: '', origName: null, type: '', pk: false, nullable: false, unique: false, auto: false, ref: null, refCol: null, comment: '' });
@@ -72,16 +77,26 @@ function openTableEditor(name, at = null, col = null) {
         name: c.name, origName: c.name, type: c.type ?? '', pk: c.pk || (!!t.pkLine && c.isPk), nullable: c.nullable, unique: c.unique, auto: c.auto,
         ref: !c.ref ? null : c.target === t || (!c.target && lc(c.ref) === lc(t.name)) ? SELF : c.target?.name ?? c.ref,
         refCol: !c.ref ? null : !c.target ? c.refCol : pointsToPk(c) ? null : c.targetCol.name,
-        onDelete: c.onDelete, onUpdate: c.onUpdate, default: c.default, indexed: c.indexed, // kept as they are: the dialog doesn't edit them
+        onDelete: c.onDelete, onUpdate: c.onUpdate, default: c.default, // kept as they are: the dialog doesn't edit them
         comment: inlineComment(lines[c.line - 1]),
       }))
     : [{ ...blankCol(), name: 'Id' }, blankCol()];
+  // a key's or an index's own line keeps its comment; one written after a column is the column's
+  const ixRow = (names, unique, line) => ({ unique, comment: t.cols.some(c => c.line === line) ? '' : inlineComment(lines[line - 1]),
+    chips: names.map(n => { const col = dlg.cols.find(c => lc(c.name) === lc(n)); return col ? { col } : { written: n }; }) });
+  dlg.ixs = t ? [
+    ...dlg.cols.filter(c => c.unique).map(col => ({ unique: true, comment: '', chips: [{ col }] })),
+    ...(t.uniques ?? []).filter(u => u.cols.length > 1 || !colNamed(t, u.cols[0])).map(u => ixRow(u.cols, true, u.line)),
+    ...(t.indexes ?? []).map(ix => ixRow(ix.cols, false, ix.line)),
+  ] : [];
   $('#tdTitle').textContent = t ? `Edit table ${t.name}` : 'New table';
   $('#tdDelete').hidden = !t;
   disarmDelete();
   tdName.value = t ? t.name : '';
   clearError();
+  showTab('cols');
   renderCols();
+  renderIndexes();
   dlg.start = snapshot();
   dlgEl.hidden = false;
   const colIn = col != null && tdCols.querySelector(`.col-row[data-i="${dlg.cols.findIndex(c => c.name === col)}"] .c-name`);
@@ -95,8 +110,9 @@ function closeTableEditor() {
   dlg = null;
 }
 
-// The name and the columns that would be saved (empty rows aren't)
-const snapshot = () => JSON.stringify([tdName.value, dlg.cols.filter(c => c.name.trim() || c.type.trim() || c.ref)]);
+// The name, the columns and the indexes that would be saved (empty rows aren't)
+const snapshot = () => JSON.stringify([tdName.value, dlg.cols.filter(c => c.name.trim() || c.type.trim() || c.ref),
+  dlg.ixs.map(ix => [ix.unique, ix.chips.map(chipName)])]);
 
 // Esc and a click outside ask before throwing edits away (Cancel says what it does, so it doesn't)
 async function requestClose() {
@@ -226,8 +242,12 @@ tdCols.addEventListener('click', e => {
   if (act.startsWith('fk-')) return fkPanelClick(b);
   const i = +b.closest('.col-row').dataset.i, cols = dlg.cols;
   switch (act) {
-    case 'flag': cols[i][b.dataset.f] = b.getAttribute('aria-pressed') !== 'true'; return refreshHints();
-    case 'del': cols.splice(i, 1); dlg.fk = null; break;
+    case 'flag': {
+      const on = b.getAttribute('aria-pressed') !== 'true';
+      if (b.dataset.f === 'unique') setColumnUnique(cols[i], on); else cols[i][b.dataset.f] = on;
+      return refreshHints();
+    }
+    case 'del': dropIndexColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; renderIndexes(); break;
     case 'unlink': cols[i].ref = cols[i].refCol = null; if (dlg.fk?.row === i) dlg.fk = null; break;
     case 'fk': return openFk(i);
   }
@@ -273,12 +293,114 @@ tdCols.addEventListener('pointerdown', e => {
 });
 
 function addColumn() {
+  showTab('cols');
   dlg.fk = null;
   dlg.cols.push(blankCol());
   renderCols();
   tdCols.querySelector(`.col-row[data-i="${dlg.cols.length - 1}"] .c-name`).focus();
 }
 $('#tdAdd').onclick = addColumn;
+
+// ─── Tabs: Columns, Indexes ──────────────────────────────────────────────────
+
+function showTab(tab) {
+  dlg.tab = tab;
+  for (const b of dlgEl.querySelectorAll('.dlg-tabs [data-tab]')) {
+    b.classList.toggle('on', b.dataset.tab === tab);
+    b.setAttribute('aria-selected', String(b.dataset.tab === tab));
+    b.tabIndex = b.dataset.tab === tab ? 0 : -1;
+  }
+  $('#tdColsPane').hidden = tab !== 'cols';
+  $('#tdIdxPane').hidden = tab !== 'idx';
+  if (tab === 'idx') renderIndexes(); // the columns' names as typed
+}
+for (const b of dlgEl.querySelectorAll('.dlg-tabs [data-tab]')) b.onclick = () => { if (dlg.fk) closeFk(); showTab(b.dataset.tab); };
+// ← → between the tabs, as a tab list does
+dlgEl.querySelector('.dlg-tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  const tab = dlg.tab === 'cols' ? 'idx' : 'cols';
+  showTab(tab);
+  dlgEl.querySelector(`.dlg-tabs [data-tab="${tab}"]`).focus();
+});
+
+// ─── Index rows: unique keys and indexes, each over its columns in order ─────
+
+// A chip's name as it stands: its column's as typed, else the name it was written with; '' for a column with none
+const chipName = ch => ch.col ? ch.col.name.trim() : ch.written;
+// Whether a UNIQUE row is over the column alone: its UNIQUE
+const uniqueAlone = c => dlg.ixs.some(ix => ix.unique && ix.chips.length === 1 && ix.chips[0].col === c);
+// The Indexes tab changed: each column's UNIQUE follows it
+const syncUniques = () => { for (const c of dlg.cols) c.unique = uniqueAlone(c); };
+
+// The Columns tab's UNIQUE of a column ticked or not: a UNIQUE row over it alone added, or those there are gone
+function setColumnUnique(c, on) {
+  if (on && !uniqueAlone(c)) dlg.ixs.push({ unique: true, comment: '', chips: [{ col: c }] });
+  if (!on) dlg.ixs = dlg.ixs.filter(ix => !(ix.unique && ix.chips.length === 1 && ix.chips[0].col === c));
+  syncUniques();
+  renderIndexes();
+}
+
+// A column removed: a unique key over it goes, as dropping the column takes it along; an index loses it, and goes
+// where it is over none then
+function dropIndexColumn(c) {
+  dlg.ixs = dlg.ixs.filter(ix => {
+    const at = ix.chips.findIndex(ch => ch.col === c);
+    if (at < 0) return true;
+    if (ix.unique || ix.chips.length === 1) return false;
+    ix.chips.splice(at, 1);
+    return true;
+  });
+  syncUniques();
+}
+
+function renderIndexes() {
+  tdIdx.innerHTML = dlg.ixs.map((ix, i) => {
+    const chips = ix.chips.map((ch, k) => {
+      const name = chipName(ch), lost = !ch.col || !name; // a name no column has, or a column with no name to save under
+      return `<span class="ix-chip${lost ? ' lost' : ''}" title="${lost ? (ch.col ? 'This column has no name yet' : `${esc(name)} is no column of this table`) : ''}">` +
+        `${esc(name || 'no name')}<button data-act="ix-chip" data-k="${k}" title="Take ${esc(name || 'it')} out" aria-label="Take ${esc(name || 'it')} out">×</button></span>`;
+    }).join('');
+    const choices = dlg.cols.map((c, j) => [c, j]).filter(([c]) => c.name.trim() && !ix.chips.some(ch => ch.col === c));
+    return `<div class="ix-row" data-ix="${i}">
+      <div class="ix-cols">${chips}<select class="ix-add" aria-label="Add a column to this index"${choices.length ? '' : ' disabled'}>` +
+        `<option value="">Add column</option>${choices.map(([c, j]) => `<option value="${j}">${esc(c.name.trim())}</option>`).join('')}</select></div>
+      <button class="pill" data-act="ix-unique" aria-pressed="${ix.unique}" title="UNIQUE: no two rows have the same ${ix.chips.length > 1 ? 'values in these columns' : 'value here'}">UNIQUE</button>
+      <button class="icon-x" data-act="ix-del" title="Remove ${ix.unique ? 'unique key' : 'index'}" aria-label="Remove ${ix.unique ? 'unique key' : 'index'}">×</button>
+    </div>`;
+  }).join('') || '<div class="ix-empty">No indexes or unique keys yet. An index makes searches and joins on its columns fast; a column\'s UNIQUE on the Columns tab is one too.</div>';
+}
+
+tdIdx.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const i = +b.closest('.ix-row').dataset.ix, ix = dlg.ixs[i];
+  if (b.dataset.act === 'ix-chip') ix.chips.splice(+b.dataset.k, 1);
+  else if (b.dataset.act === 'ix-unique') ix.unique = !ix.unique;
+  else if (b.dataset.act === 'ix-del') dlg.ixs.splice(i, 1);
+  syncUniques();
+  renderIndexes();
+  refreshHints();
+  // the focus stays in the row: on its list once a chip is gone, else on the button clicked
+  const row = tdIdx.querySelector(`.ix-row[data-ix="${Math.min(i, dlg.ixs.length - 1)}"]`);
+  (b.dataset.act === 'ix-unique' ? row?.querySelector('[data-act="ix-unique"]') : row?.querySelector('.ix-add:not(:disabled)') ?? row?.querySelector('button'))?.focus();
+});
+tdIdx.addEventListener('change', e => {
+  if (!e.target.classList.contains('ix-add') || e.target.value === '') return;
+  const i = +e.target.closest('.ix-row').dataset.ix;
+  dlg.ixs[i].chips.push({ col: dlg.cols[+e.target.value] });
+  syncUniques();
+  renderIndexes();
+  refreshHints();
+  tdIdx.querySelector(`.ix-row[data-ix="${i}"] .ix-add`)?.focus();
+});
+function addIndex() {
+  showTab('idx');
+  dlg.ixs.push({ unique: false, comment: '', chips: [] });
+  renderIndexes();
+  tdIdx.querySelector(`.ix-row[data-ix="${dlg.ixs.length - 1}"] .ix-add`)?.focus();
+}
+$('#tdAddIdx').onclick = addIndex;
 
 // ─── Foreign-key chooser: table list, then primary key or a specific column ──
 
@@ -408,8 +530,9 @@ function fkKeydown(e) {
 
 // ─── Save / delete ───────────────────────────────────────────────────────────
 
-// Why Save didn't, under the field it is about (lined up with it)
+// Why Save didn't, under the field it is about (lined up with it), on the tab it is on
 function fail(input, msg) {
+  if (input.closest('#tdColsPane')) showTab('cols');
   clearError();
   input.classList.add('invalid');
   input.focus();
@@ -447,13 +570,23 @@ function saveTable() {
     if (seen.has(lc(cn))) return fail(nameIn, `There are two columns named ${cn}.`);
     if (/#|->/.test(ct)) return fail(typeIn, 'The type can\'t contain # or ->.');
     seen.add(lc(cn));
-    cols.push({ ...c, name: cn, type: ct });
+    cols.push({ ...c, name: cn, type: ct, of: c }); // of: its row, which the index rows' chips name
   }
 
   // Columns renamed in the dialog: references to them (here and in other tables) follow along
   const renamed = new Map(cols.filter(c => c.origName && c.origName !== c.name).map(c => [lc(c.origName), c.name]));
   const toSelf = c => c.ref === SELF || (dlg.orig && c.ref && lc(c.ref) === lc(dlg.orig));
 
+  // The Indexes tab's rows, under their columns' names as saved: a UNIQUE one over one column is that column's unique,
+  // one over several a unique (…) line; an index over one column is its index, one over several an index (…) line.
+  // A column with no name leaves them, and a row over none is none; a name that was no column of the table stays as
+  // written (on a line of its own), for the text to report, and so does a line's comment.
+  const flagged = { unique: new Set(), index: new Set() }, keyLines = { unique: [], index: [] };
+  for (const ix of dlg.ixs) {
+    const chips = ix.chips.filter(chipName), word = ix.unique ? 'unique' : 'index';
+    if (chips.length === 1 && chips[0].col && !ix.comment) flagged[word].add(chips[0].col);
+    else if (chips.length) keyLines[word].push(`  ${word} (${chips.map(chipName).join(', ')})` + (ix.comment ? '  ' + ix.comment : ''));
+  }
   const block = [name + (dlg.nameComment ? '  ' + dlg.nameComment : '')];
   const pkLine = cols.filter(c => c.pk).length > 1; // a key over several columns gets its own line
   for (const c of cols) {
@@ -461,8 +594,8 @@ function saveTable() {
     if (c.type) parts.push(c.type);
     if (c.pk && !pkLine) parts.push('pk');
     if (c.nullable) parts.push('null');
-    if (c.unique) parts.push('unique');
-    if (c.indexed) parts.push('index');
+    if (flagged.unique.has(c.of)) parts.push('unique');
+    if (flagged.index.has(c.of)) parts.push('index');
     if (c.auto && !isIdName(c.name)) parts.push('auto_increment');
     if (c.ref) {
       const self = toSelf(c);
@@ -474,6 +607,7 @@ function saveTable() {
     block.push('  ' + parts.join(' ') + (c.comment ? '  ' + c.comment : ''));
   }
   if (pkLine) block.push(`  pk (${cols.filter(c => c.pk).map(c => c.name).join(', ')})`);
+  block.push(...keyLines.unique, ...keyLines.index);
 
   histBegin(dlg.orig ? 'edit table' : 'new table');
   const lines = state.text.split('\n');
@@ -492,12 +626,7 @@ function saveTable() {
     if (name !== dlg.orig && pos[dlg.orig]) { pos[name] = pos[dlg.orig]; delete pos[dlg.orig]; }
     const [s, e] = blockRange(lines, t.line - 1);
     const comments = lines.slice(s + 1, e + 1).filter(l => /^\s+#/.test(l)); // keep comment lines inside the table
-    // and the unique (…) and index (…) lines, following renamed columns; columns deleted in the dialog leave them
-    const keyLines = (word, keys) => keys.filter(u => u.cols.length > 1)
-      .map(u => ({ cols: u.cols.map(n => renamed.get(lc(n)) ?? n), comment: inlineComment(lines[u.line - 1]) }))
-      .filter(u => u.cols.every(n => seen.has(lc(n))))
-      .map(u => `  ${word} (${u.cols.join(', ')})` + (u.comment ? '  ' + u.comment : ''));
-    lines.splice(s, e - s + 1, block[0], ...comments, ...block.slice(1), ...keyLines('unique', t.uniques), ...keyLines('index', t.multiIndexes));
+    lines.splice(s, e - s + 1, block[0], ...comments, ...block.slice(1));
     at = s + 1;
   } else {
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();

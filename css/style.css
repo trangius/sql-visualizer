@@ -657,7 +657,37 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .icon-btn.link { width: 30px; height: 28px; border: 1px solid transparent; border-radius: 7px; color: var(--faint); }
 .icon-btn.link svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .col-row.fk-open .fk-chip, .col-row.fk-open .icon-btn.link { border-color: var(--accent); color: var(--accent); }
-#tdAdd { margin: 8px 0 20px; }
+#tdAdd, #tdAddIdx { margin: 8px 0 20px; }
+/* Columns / Indexes: the one shown underlined */
+.dlg-tabs { display: flex; gap: 4px; margin: -4px 0 12px; border-bottom: 1px solid var(--line); }
+.dlg-tabs button {
+  height: 32px; padding: 0 10px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; background: none;
+  color: var(--muted); font-weight: 500; font-size: 13px;
+}
+.dlg-tabs button:hover { color: var(--fg); }
+.dlg-tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+/* an index or unique key: its columns as chips in order, a list that adds one, UNIQUE, × */
+#tdIdx { min-height: 74px; }
+.ix-row { display: grid; grid-template-columns: 1fr 54px 28px; gap: 6px; align-items: center; padding: 3px 0; }
+.ix-cols { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.ix-chip {
+  display: inline-flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 9px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--box-bg); font: 12.5px var(--mono); white-space: nowrap;
+}
+.ix-chip.lost { color: var(--err); border-color: var(--err); }
+.ix-chip button {
+  width: 22px; height: 22px; padding: 0; line-height: 1; border: 0; border-radius: 5px; background: none; color: var(--muted);
+}
+.ix-chip button:hover { background: var(--hover); color: var(--fg); }
+.ix-add {
+  height: 28px; padding: 0 28px 0 9px; border: 1px solid var(--line); border-radius: 7px; font: 12.5px var(--font); color: var(--muted);
+  appearance: none; -webkit-appearance: none; cursor: pointer; max-width: 160px;
+  background: var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a857c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 6px center;
+}
+.ix-add:hover:not(:disabled) { border-color: var(--line2); color: var(--fg); }
+.ix-add:disabled { opacity: .5; cursor: default; }
+.ix-add option { color: var(--fg); background: var(--panel); }
+.ix-empty { color: var(--muted); font-size: 12.5px; padding: 8px 0; line-height: 1.5; }
 /* why Save didn't: under the field it is about */
 .field-error { color: var(--err); font-size: 12.5px; margin: 0 0 6px; }
 .field + .field-error { margin: -10px 0 12px; }

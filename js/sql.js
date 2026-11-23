@@ -128,8 +128,8 @@ function parseSQL(src, dialect = 'mariadb') {
     if (kw === 'CREATE') {
       p.next();
       p.eatW('OR'); p.eatW('REPLACE'); p.eatW('TEMPORARY');
-      const kind = p.eatW('UNIQUE', 'FULLTEXT', 'SPATIAL')?.u;
-      if (p.eatW('INDEX', 'KEY')) { createIndex(p, kind, line, findAcc, warn, error); continue; }
+      const kind = p.eatW('UNIQUE', 'FULLTEXT', 'SPATIAL')?.u, plain = indexKind(p);
+      if (p.eatW('INDEX', 'KEY')) { createIndex(p, kind, plain, line, findAcc, warn, error); continue; }
       if (!p.eatW('TABLE')) {
         if (!p.isW('DATABASE', 'SCHEMA')) warn(line, `CREATE ${p.peek()?.v ?? ''} is not shown in the diagram. Ignored.`);
         continue;
@@ -173,7 +173,7 @@ function parseSQL(src, dialect = 'mariadb') {
 
 function parseDef(p, acc, warn, error) {
   const line = p.peek().line;
-  if (p.eatW('CONSTRAINT') && !p.isW('PRIMARY', 'FOREIGN', 'UNIQUE', 'CHECK')) p.ident();
+  const named = p.eatW('CONSTRAINT') && !p.isW('PRIMARY', 'FOREIGN', 'UNIQUE', 'CHECK') ? p.ident()?.v ?? null : null;
   if (p.eatW('DEFAULT')) { // SQL Server: [CONSTRAINT name] DEFAULT value FOR column
     const d = readDefault(p), col = p.eatW('FOR') && p.ident();
     const c = col && acc.cols.find(c => c.name.toLowerCase() === col.v.toLowerCase());
@@ -190,7 +190,7 @@ function parseDef(p, acc, warn, error) {
     const cols = p.identList();
     if (!p.eatW('REFERENCES')) { warn(line, 'FOREIGN KEY without REFERENCES. Ignored.'); return; }
     const rt = p.qname(), rcols = p.identList();
-    acc.fks.push({ cols, rt: rt?.v, rcols, line, ...fkActions(p) });
+    acc.fks.push({ name: named, cols, rt: rt?.v, rcols, line, ...fkActions(p) });
   } else if (p.eatW('UNIQUE')) {
     p.eatW('KEY', 'INDEX');
     if (!p.isP('(')) p.ident();
@@ -198,9 +198,10 @@ function parseDef(p, acc, warn, error) {
   } else if (p.eatW('FULLTEXT', 'SPATIAL')) {
     // search indexes are not part of the diagram
   } else if (p.eatW('KEY', 'INDEX')) {
-    const name = p.isP('(') ? null : p.ident();
-    if (p.eatW('USING')) p.next();
-    acc.indexes.push({ name: name?.v ?? null, cols: p.identList(), line });
+    const name = p.isP('(') || p.isW('USING', 'CLUSTERED', 'NONCLUSTERED') ? null : p.ident();
+    const before = indexKind(p), cols = plainIndexCols(p);
+    if (cols && before && indexKind(p) && !p.isW('INCLUDE')) acc.indexes.push({ name: name?.v ?? null, cols, line });
+    else warn(line, NOT_PLAIN);
   } else if (p.isW('CHECK')) {
     warn(line, 'CHECK constraints are not shown. Ignored.');
   } else {
@@ -208,18 +209,51 @@ function parseDef(p, acc, warn, error) {
   }
 }
 
-// CREATE [UNIQUE] INDEX name ON table (cols). A UNIQUE one counts as a unique constraint.
-function createIndex(p, kind, line, findAcc, warn, error) {
+// CREATE [UNIQUE] INDEX name ON table (cols). A UNIQUE one counts as a unique constraint; another is an index where
+// it is one the text says (plainIndexCols), else not kept.
+function createIndex(p, kind, plain, line, findAcc, warn, error) {
+  p.eatW('CONCURRENTLY');
   if (p.eatW('IF')) { p.eatW('NOT'); p.eatW('EXISTS'); }
   const name = p.isW('ON') ? null : p.ident();
   if (!p.eatW('ON')) { error(line, 'CREATE INDEX without ON table'); return; }
+  p.eatW('ONLY');
   const t = p.qname(), acc = t && findAcc(t.v);
   if (!acc) { error(line, `CREATE INDEX on unknown table ${t?.v ?? ''}`); return; }
-  if (p.eatW('USING')) p.next();
-  const cols = p.identList();
-  if (!cols.length) { error(line, 'CREATE INDEX without columns'); return; }
-  if (kind === 'UNIQUE') acc.uniques.push({ cols, line });
-  else if (!kind) acc.indexes.push({ name: name?.v ?? null, cols, line });
+  const before = indexKind(p), at = p.i, cols = plainIndexCols(p);
+  if (kind === 'UNIQUE' || !cols) { // the columns of any
+    p.i = at;
+    const any = p.identList();
+    if (!any.length) { error(line, 'CREATE INDEX without columns'); return; }
+    if (kind === 'UNIQUE') acc.uniques.push({ cols: any, line });
+    else if (!kind) warn(line, NOT_PLAIN);
+    return;
+  }
+  if (kind) return; // FULLTEXT, SPATIAL: search indexes are not part of the diagram
+  if (plain && before && indexKind(p) && !p.isW('WHERE', 'INCLUDE')) acc.indexes.push({ name: name?.v ?? null, cols, line });
+  else warn(line, NOT_PLAIN);
+}
+
+const NOT_PLAIN = 'An index the text has no word for is not kept in it: one of every row over whole columns, ascending, is';
+// Past what says an index's kind where it comes, USING and its method, CLUSTERED or NONCLUSTERED: false where it is
+// none the text says (another method than a B-tree, a clustered one), else true
+function indexKind(p) {
+  let plain = true;
+  for (;;) {
+    if (p.eatW('NONCLUSTERED')) continue;
+    if (p.eatW('CLUSTERED')) { plain = false; continue; }
+    if (!p.eatW('USING')) return plain;
+    plain = plain && p.isW('BTREE');
+    p.next();
+  }
+}
+// ( column [ASC], … ): the columns of an index over whole columns, ascending; null for another (a prefix's length,
+// DESC, an expression), or none
+function plainIndexCols(p) {
+  const g = p.group();
+  if (!g) return null;
+  const cols = splitTop(g).map(([name, ...rest]) =>
+    name && (name.t === 'w' || name.t === 'id') && rest.every(x => x.t === 'w' && x.u === 'ASC') ? name.v : null);
+  return cols.length && cols.every(Boolean) ? cols : null;
 }
 
 function skipAction(p) { // ON UPDATE CURRENT_TIMESTAMP and the like
@@ -390,5 +424,15 @@ function finalizeTable(acc, warn, error, dialect, findAcc) {
       col.onUpdate = fk.onUpdate ?? null;
     });
   }
-  return { name: acc.name, line: acc.line, cols, indexes: acc.indexes, uniques: acc.uniques }; // resolve() checks the uniques
+  // MariaDB and MySQL make an index for a foreign key whose columns no key or index begins with, named after the key
+  // (or after its first column where the server named the key Table_ibfk_n); a dump writes it as a KEY, which is not
+  // one of the table's own. Indexes have no names in the text.
+  const own = ix => {
+    const fk = acc.fks.find(f => f.name && f.cols.some(n => lc(n) === lc(ix.cols[0])));
+    if (!fk || fk.cols.length !== ix.cols.length || !ix.cols.every(n => fk.cols.some(m => lc(m) === lc(n)))) return false;
+    const name = lc(ix.name ?? ix.cols[0]);
+    return name === lc(fk.name) || (lc(fk.name).startsWith(lc(acc.name) + '_ibfk_') && name === lc(ix.cols[0]));
+  };
+  const indexes = acc.indexes.filter(ix => !(['mariadb', 'mysql'].includes(dialect) && own(ix))).map(ix => ({ cols: ix.cols, line: ix.line }));
+  return { name: acc.name, line: acc.line, cols, indexes, uniques: acc.uniques }; // resolve() checks the uniques and indexes
 }

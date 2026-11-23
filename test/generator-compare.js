@@ -4,11 +4,12 @@
 // generate_schema_sql, for MariaDB, MySQL, PostgreSQL, SQL Server and SQLite. Every schema the
 // tests know (js/examples.js, the CASES of test/sql-check.js, test/fixtures/*.txt) is read here,
 // written again in jaidb's Simple text with only what both models have (tables, columns, types,
-// primary keys, NULL, one-column UNIQUE, foreign keys and their actions, the numbered Id), and
-// given to test/jaidb-sql.jai. sql_visualizer's script is made from the same model without what
-// jaidb has not (defaults, indexes, UNIQUE over several columns, the enum CHECK, the DROP preamble
-// and the FOREIGN_KEY_CHECKS/PRAGMA lines). The two are compared statement by statement, and the
-// differences are printed by category, with the notes each gives on a type written as another (jaidb's unmade).
+// primary keys, NULL, UNIQUE, foreign keys and their actions, the numbered Id, indexes: `index` after its
+// one column, `index (A, B)` lines), and given to test/jaidb-sql.jai. sql_visualizer's script is made from
+// the same model without what jaidb has not (defaults, the enum CHECK, the DROP preamble and the
+// FOREIGN_KEY_CHECKS/PRAGMA lines). The two are compared statement by statement (an index's name, columns and
+// place: in its CREATE TABLE, or a CREATE INDEX right after it), and the differences are printed by category,
+// with the notes each gives on a type written as another (jaidb's unmade).
 // Exits 1 when anything differs.
 //
 // Run: node test/generator-compare.js [-v] [part of a schema's name]
@@ -55,26 +56,30 @@ function jaidbText(tables, skip) {
   for (const t of tables) {
     out.push(t.name);
     const composite = t.pkCols.length > 1;
+    // jaidb keeps the indexes in the order they are written: those after a column, in its order, then the lines, as
+    // the model has them; else each on a line of its own, `index (A)` too, as the model has them
+    const linesOnly = t.idxs.map(ix => ix.cols.length > 1).join() !== t.idxs.map(ix => ix.cols.length > 1).sort().join() ||
+      t.idxs.filter(ix => ix.cols.length === 1).some((ix, i, one) => i && t.cols.indexOf(ix.cols[0]) < t.cols.indexOf(one[i - 1].cols[0]));
     for (const c of t.cols) {
       const parts = [c.name];
       if (c.type) parts.push(c.type);
       if (c.isPk && !composite) parts.push('pk');
       if (c.nullable) parts.push('null');
       if (c.unique) parts.push('unique');
+      if (c.indexed && !linesOnly) parts.push('index');
       if (c.ref && c.target) {
         parts.push('-> ' + refText(c));
         if (c.onDelete) parts.push('on delete ' + c.onDelete);
         if (c.onUpdate) parts.push('on update ' + c.onUpdate);
       }
       if (c.default != null) skip('default');
-      if (c.indexed) skip('index on one column');
       if (c.autoInc && !isIdName(c.name)) skip('auto_increment on a column not named Id');
       if (/^(enum|set)\(/.test(c.effType ?? '')) skip('enum/set CHECK (the type itself is kept)');
       out.push('  ' + parts.join(' '));
     }
     if (composite) out.push(`  pk (${t.pkCols.map(c => c.name).join(', ')})`);
     for (const u of t.multiUniques) out.push(`  unique (${u.cols.map(c => c.name).join(', ')})`);
-    if (t.multiIndexes.length) skip('index over several columns', t.multiIndexes.length);
+    for (const ix of linesOnly ? t.idxs : t.multiIndexes) out.push(`  index (${ix.cols.map(c => c.name).join(', ')})`);
     out.push('');
   }
   return out.join('\n');
@@ -82,10 +87,7 @@ function jaidbText(tables, skip) {
 
 // What jaidb has not, taken out of the model before sql_visualizer writes it
 function stripModel(tables) {
-  for (const t of tables) {
-    t.indexes = []; t.multiIndexes = [];
-    for (const c of t.cols) { c.default = null; c.indexed = false; }
-  }
+  for (const t of tables) for (const c of t.cols) c.default = null;
 }
 
 // ─── The jaidb tool ──────────────────────────────────────────────────────────
@@ -170,13 +172,18 @@ function columnOf(item) {
   return { raw: m[1], bare: unq(m[1]), type: type.trim(), said: said.map(x => x[1]), names };
 }
 
-// One script as tables: { order, tables: {bare → table}, extra: [statements not understood] }
+// One script as tables: { order, tables: {bare → table}, extra: [statements not understood] }. A table's indexes:
+// [{ name, cols, where }], where 'in CREATE TABLE', 'right after its table' or 'after another table'.
 function model(sql) {
   const out = { order: [], tables: {}, alters: [], extra: [] };
+  let last = null; // the last statement's table: CREATE TABLE's, or CREATE INDEX's right after it
   for (const s of statements(sql)) {
+    const lastTable = last;
+    last = null;
     let m = s.match(new RegExp(`^CREATE TABLE (${QNAME}) \\((.*)\\)$`, 'u'));
     if (m) {
-      const name = qualified(m[1]), t = { name, columns: [], pk: null, fks: {}, uniques: [], other: [] };
+      const name = qualified(m[1]), t = { name, columns: [], pk: null, fks: {}, uniques: [], indexes: [], other: [] };
+      last = name.bare.toLowerCase();
       out.order.push(name.bare);
       out.tables[name.bare.toLowerCase()] = t;
       for (const item of splitTop(m[2])) {
@@ -185,7 +192,7 @@ function model(sql) {
         if (pk) t.pk = { name: pk[1] ? unq(pk[1]) : null, cols: cols(pk[2]).join(','), where: 'table' };
         else if (fk) t.fks[fk.col.toLowerCase()] = fk;
         else if (/^(CONSTRAINT \S+ )?UNIQUE \(/.test(item)) t.uniques.push(item);
-        else if (/^INDEX /.test(item)) continue; // MariaDB's index for a key to a column without one: jaidb has none
+        else if ((m = item.match(new RegExp(`^INDEX (${NAME}) \\((.*)\\)$`, 'u')))) t.indexes.push({ name: m[1], cols: cols(m[2]).join(','), where: 'in CREATE TABLE' });
         else t.columns.push(columnOf(item));
       }
       const inline = t.columns.find(c => c.said.includes('PRIMARY KEY'));
@@ -197,20 +204,28 @@ function model(sql) {
     // SQL Server's unique index on a column that may be null
     m = s.match(new RegExp(`^CREATE UNIQUE INDEX (${NAME}) ON (${QNAME}) \\((${NAME})\\) WHERE .* IS NOT NULL$`, 'u'));
     if (m) { out.alters.push({ table: qualified(m[2]), filtered: { name: unq(m[1]), col: unq(m[3]) } }); continue; }
+    m = s.match(new RegExp(`^CREATE INDEX (${NAME}) ON (${QNAME}) \\((.*)\\)$`, 'u'));
+    if (m) {
+      const table = qualified(m[2]), bare = table.bare.toLowerCase();
+      out.alters.push({ table, index: { name: m[1], cols: cols(m[3]).join(','), where: lastTable === bare ? 'right after its table' : 'after another table' } });
+      last = lastTable === bare ? bare : null;
+      continue;
+    }
     out.extra.push(s);
   }
   for (const a of out.alters) {
     const t = out.tables[a.table.bare.toLowerCase()];
-    if (!t) { out.extra.push(a.fk ? 'ALTER TABLE ' + a.table.raw : 'CREATE UNIQUE INDEX'); continue; }
+    if (!t) { out.extra.push(a.fk ? 'ALTER TABLE ' + a.table.raw : a.index ? 'CREATE INDEX' : 'CREATE UNIQUE INDEX'); continue; }
     if (a.fk) t.fks[a.fk.col.toLowerCase()] = a.fk;
+    else if (a.index) t.indexes.push(a.index);
     else { const c = t.columns.find(c => c.bare.toLowerCase() === a.filtered.col.toLowerCase()); if (c) c.filtered = a.filtered.name; }
   }
   return out;
 }
 
 // What sql_visualizer writes that jaidb has no part in
-const PREAMBLE = /^(DROP TABLE|SET FOREIGN_KEY_CHECKS|PRAGMA|IF OBJECT_ID\(.*DROP CONSTRAINT)|^CREATE INDEX /;
-const svScript = sql => statements(sql).filter(s => !PREAMBLE.test(s)).map(s => s.replace(/, INDEX \S+ \([^)]*\)/g, '').replace(/ CHECK \(\S+ IN \((?:'(?:[^']|'')*'|[ ,])*\)\)/g, '')).join(';\n') + ';\n';
+const PREAMBLE = /^(DROP TABLE|SET FOREIGN_KEY_CHECKS|PRAGMA|IF OBJECT_ID\(.*DROP CONSTRAINT)/;
+const svScript = sql => statements(sql).filter(s => !PREAMBLE.test(s)).map(s => s.replace(/ CHECK \(\S+ IN \((?:'(?:[^']|'')*'|[ ,])*\)\)/g, '')).join(';\n') + ';\n';
 
 // ─── The comparison ──────────────────────────────────────────────────────────
 
@@ -290,6 +305,16 @@ function compare(sv, jb) {
       if (x.actions !== y.actions) add('other', `actions: sv "${x.actions}", jaidb "${y.actions}"`, where);
     }
     if (s.uniques.join() !== j.uniques.join()) add('other', 'table UNIQUE differs', `${tn}: ${s.uniques.join('; ')} vs ${j.uniques.join('; ')}`);
+    // the indexes, in their order: over the same columns, named alike, made in the same place
+    const over = ixs => ixs.map(ix => unq(ix.cols).toLowerCase()).join(' | ');
+    if (over(s.indexes) !== over(j.indexes)) add('other', 'indexes differ', `${tn}: sv ${over(s.indexes) || '-'}, jaidb ${over(j.indexes) || '-'}`);
+    else s.indexes.forEach((x, k) => {
+      const y = j.indexes[k], where = `${tn} (${x.cols})`;
+      if (x.where !== y.where) add('index placement', `sv ${x.where}, jaidb ${y.where}`, where);
+      if (x.name === y.name) return;
+      if (unq(x.name) === unq(y.name)) add('quoting', `index name: ${quoteKind(x.name, y.name)}`, `${x.name} vs ${y.name}`);
+      else add('constraint names', `index: sv ${pattern(unq(x.name), tn, x.cols.replace(/,/g, '_'))}, jaidb ${pattern(unq(y.name), tn, y.cols.replace(/,/g, '_'))}`, `${where}: ${x.name} vs ${y.name}`);
+    });
   }
   for (const x of a.extra.filter(x => !b.extra.includes(x))) add('other', 'statement only in sv', x.slice(0, 120));
   for (const x of b.extra.filter(x => !a.extra.includes(x))) add('other', 'statement only in jaidb', x.slice(0, 120));
@@ -307,7 +332,10 @@ const unmadeNotes = [];
 for (const [name, [src, expects, from = 'mariadb']] of SCHEMAS) {
   const r = parse(src, from);
   if (r.problems.some(p => p.level === 'error')) {
-    refused.push([name, 'all', 'sv', r.problems.find(p => p.level === 'error').msg]);
+    // what sv says is wrong with the text itself, for every engine: whether jaidb says so of the text too
+    let jbRefuses = false;
+    try { const jb = jaidb(jaidbText(r.tables, () => {})); jbRefuses = Object.values(ENGINES).every(E => jb[E].problems.some(p => !p.warning)); } catch {}
+    refused.push([name, 'all', jbRefuses ? 'both' : 'sv alone', r.problems.find(p => p.level === 'error').msg]);
     continue;
   }
   const skip = (f, n = 1) => { const e = skipped.get(f) ?? { count: 0, schemas: new Set() }; e.count += n; e.schemas.add(name); skipped.set(f, e); };
@@ -344,7 +372,7 @@ say('\nLeft out of the jaidb text (what its model has not)');
 for (const [f, e] of skipped) say(`  ${f}: ${e.count} in ${e.schemas.size} schema${e.schemas.size > 1 ? 's' : ''}`);
 if (unmadeNotes.length) { say('\njaidb unmade'); for (const n of unmadeNotes) say('  ' + n); }
 
-const CATEGORIES = ['quoting', 'schema prefix', 'constraint names', 'types', 'FK placement', 'numbering', 'ordering', 'notes', 'other'];
+const CATEGORIES = ['quoting', 'schema prefix', 'constraint names', 'types', 'FK placement', 'index placement', 'numbering', 'ordering', 'notes', 'other'];
 say('\nDifferences by category (count, schema×engine pairs)');
 for (const cat of CATEGORIES) {
   const of = all.filter(x => x.category === cat);

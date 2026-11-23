@@ -70,12 +70,11 @@ function sqlType(t) {
 // auto: written auto_increment (or a_i); an integer Id that is the primary key on its own counts without it (autoInc)
 // ref/refCol: "-> Table" (its primary key, refCol null) or "-> Table.Column"
 // pkLine / uniques: keys over several columns, written on their own line: "pk (A, B)", "unique (A, B)";
-// indexes: "index" after a column, or "index (A, B)" over several
+// indexes: [{ cols, line }], each "index" after its one column or "index (A, B)" on its own line, as they come.
+// An index has no name in the text: the SQL gives it one (IX_Table_A_B)
 
 const FLAG = /^\(?(pk|null|unique|index|auto_increment|a_i)\)?$/i;
 const KEY_LINE = /^\s+(pk|unique|index)\s*\(([^)]*)\)?\s*$/i;
-// The name an index gets in the SQL when none was given
-const indexName = (table, cols) => `idx_${table}_${cols.join('_')}`;
 
 // "# e.g. Volvo, Saab, Audi" after a column: the values its sample data takes
 function sampleHint(line) {
@@ -202,7 +201,7 @@ function parseText(src) {
       else if (f[1].toLowerCase() === 'pk') col.pk = true;
       else if (f[1].toLowerCase() === 'null') col.nullable = true;
       else if (f[1].toLowerCase() === 'unique') col.unique = true;
-      else if (f[1].toLowerCase() === 'index') cur.indexes.push({ name: null, cols: [name], line });
+      else if (f[1].toLowerCase() === 'index') cur.indexes.push({ cols: [name], line });
       else col.auto = true;
     }
     col.type = typeParts.join(' ') || null;
@@ -224,6 +223,25 @@ function parseText(src) {
 // Is c on its own the primary key of t? A foreign key to such a column is written "-> Table"
 const solePk = (t, c) => t.pkCols.length === 1 && t.pkCols[0] === c;
 const pointsToPk = c => solePk(c.target, c.targetCol);
+// Whether an arrow points at a key, which every database points a foreign key at: the primary key, a unique column, or
+// with the arrows it is one key with (c.fkGroup) a key over several columns
+const pointsAtKey = c => !!c.fkGroup || pointsToPk(c) || c.targetCol.unique;
+// Whether c begins a key of t over several columns (its primary key, a unique (…)), or where `indexes` one of those
+// or an index
+const beginsKey = (t, c, indexes = false) => t.pkCols[0] === c || t.multiUniques.some(u => u.cols[0] === c) ||
+  (indexes && t.idxs.some(ix => ix.cols[0] === c));
+// The columns a key's names say, or why they say none: a column the table hasn't, or one twice (`written` the key's line)
+function keyCols(t, names, written) {
+  const cols = [];
+  for (const n of names) {
+    const c = colNamed(t, n);
+    if (!c) return { why: `${t.name} has no column ${n}` };
+    if (cols.includes(c)) return { why: `${n} is in ${written} twice` };
+    cols.push(c);
+  }
+  return { cols };
+}
+const sameCols = (a, b) => a.length === b.length && a.every((c, i) => c === b[i]);
 
 // An FK column without a type gets the type of the column it points to
 function defaultType(c, seen = new Set()) {
@@ -349,12 +367,25 @@ function resolve(tables, implicit = false) {
     // "unique (A, B)": the combination is unique. Over one column it is just the flag.
     t.multiUniques = [];
     for (const u of t.uniques ?? []) {
-      const cols = u.cols.map(n => colNamed(t, n));
-      const missing = u.cols.find((n, i) => !cols[i]);
-      if (missing) problems.push(problem(u.line, `${t.name} has no column ${missing}`));
+      const { cols, why } = keyCols(t, u.cols, `unique (${u.cols.join(', ')})`);
+      if (why) problems.push(problem(u.line, why));
       else if (cols.length === 1) cols[0].unique = true;
       else t.multiUniques.push({ cols, line: u.line });
     }
+    // Indexes, as they come (t.idxs, each { cols, line } with the columns themselves): one that names a column the
+    // table hasn't, or one twice, is an error and no index; one over the columns of one before it, in their order, is
+    // said and goes. An index over one column is its `index` (c.indexed), one over several is below the columns
+    // (t.multiIndexes).
+    t.idxs = [];
+    for (const ix of t.indexes ?? []) {
+      const { cols, why } = keyCols(t, ix.cols, `index (${ix.cols.join(', ')})`);
+      const twin = cols && t.idxs.find(o => sameCols(o.cols, cols));
+      if (why) problems.push(problem(ix.line, why));
+      else if (twin) problems.push(problem(ix.line, `This index is already on line ${twin.line}`, 'warn'));
+      else t.idxs.push({ cols, line: ix.line });
+    }
+    t.multiIndexes = t.idxs.filter(ix => ix.cols.length > 1);
+    for (const c of t.cols) c.indexed = t.idxs.some(ix => ix.cols.length === 1 && ix.cols[0] === c);
   }
   // A key over several columns adds nothing when part of it is already unique by itself
   for (const t of tables) {
@@ -399,6 +430,17 @@ function resolve(tables, implicit = false) {
     }
   }
   for (const t of tables) findFkGroups(t, problems);
+  // An arrow to a column that is no key: some databases point a foreign key at one a key over several columns or an
+  // index begins with (MariaDB; MySQL before 8.4), which dialectProblems says of the others; at another none does
+  for (const t of tables) {
+    for (const c of t.cols) {
+      if (!c.target || c.implicit || pointsAtKey(c)) continue;
+      const tt = c.target, where = `${tt.name}.${c.targetCol.name}`, leads = beginsKey(tt, c.targetCol);
+      if (leads || beginsKey(tt, c.targetCol, true)) problems.push(problem(c.line, `${where} only begins ${leads ? 'a key over several columns' : 'an index'}: ` +
+        'few engines can point a foreign key at it, most need it to be the primary key or unique', 'warn'));
+      else problems.push(problem(c.line, `A foreign key needs ${where} to be the primary key or unique`));
+    }
+  }
   for (const t of tables) {
     for (const c of t.cols) {
       c.effType = effType(c);
@@ -407,36 +449,12 @@ function resolve(tables, implicit = false) {
         if (bad) problems.push(problem(c.line, bad));
       }
       c.isPk = t.pkCols.includes(c);
-      c.indexed = false;
       // the database numbers the rows: an integer Id that is the key on its own, or auto_increment on such a column
       const canAuto = solePk(t, c) && INT_TYPES.has(typeParts(c.effType).base);
       c.autoInc = canAuto && (c.auto || isIdName(c.name));
       if (c.auto && !canAuto) problems.push(problem(c.line, `auto_increment needs ${c.name} to be an integer primary key on its own`));
       if (c.isPk && c.nullable) problems.push(problem(c.line, `${c.name} is a primary key and can't be null`));
     }
-  }
-  // Indexes: a one-column index is shown as a flag on its column, a longer one below the columns
-  for (const t of tables) {
-    t.indexes ??= [];
-    t.multiIndexes = [];
-    const named = new Map(); // the index's name in the SQL, lower case → index
-    t.indexes = t.indexes.filter(ix => {
-      const cols = ix.cols.map(n => t.cols.find(c => c.name.toLowerCase() === n.toLowerCase()));
-      const missing = ix.cols.find((n, i) => !cols[i]);
-      if (missing) { problems.push(problem(ix.line, `${t.name} has no column ${missing}`)); return true; }
-      ix.cols = cols.map(c => c.name);
-      const key = (ix.name ?? indexName(t.name, ix.cols)).toLowerCase(), prev = named.get(key);
-      if (prev) { // MariaDB refuses two indexes with the same name
-        problems.push(prev.cols.join() === ix.cols.join()
-          ? problem(ix.line, `This index is already on line ${prev.line}`, 'warn')
-          : problem(ix.line, `Two indexes are named ${ix.name ?? key}`));
-        return false;
-      }
-      named.set(key, ix);
-      if (cols.length === 1) cols[0].indexed = true;
-      else t.multiIndexes.push(ix);
-      return true;
-    });
   }
   return problems;
 }
@@ -456,11 +474,6 @@ function genText(tables, notes) {
     for (const n of notes) out.push(`#   ${n.msg}`);
     out.push('');
   }
-  // MariaDB's script gives a column a foreign key points to an index of its own, unless a key starts with it
-  // (or the key is over several columns, c.fkGroup): read back, that index goes without saying
-  const pointedTo = new Set(tables.flatMap(t => t.cols.filter(c => c.target && !c.fkGroup).map(c => c.targetCol)));
-  const implied = (t, c) => pointedTo.has(c) && !c.unique && t.pkCols[0] !== c && !t.multiUniques.some(u => u.cols[0] === c) &&
-    !t.multiIndexes.some(ix => ix.cols[0] === c.name);
   tables.forEach((t, i) => {
     if (i) out.push('');
     out.push(t.name);
@@ -471,7 +484,7 @@ function genText(tables, notes) {
       if (c.isPk && !pkLine && (c.pk || t.pkLine)) parts.push('pk');
       if (c.nullable) parts.push('null');
       if (c.unique) parts.push('unique');
-      if (c.indexed && !implied(t, c)) parts.push('index');
+      if (c.indexed) parts.push('index');
       if (c.autoInc && !isIdName(c.name)) parts.push('auto_increment'); // on Id it goes without saying
       if (c.ref) parts.push('-> ' + refText(c));
       const opts = optsItems(c);
@@ -480,7 +493,7 @@ function genText(tables, notes) {
     }
     if (pkLine) out.push(`  pk (${t.pkCols.map(c => c.name).join(', ')})`);
     for (const u of t.multiUniques) out.push(`  unique (${u.cols.map(c => c.name).join(', ')})`);
-    for (const ix of t.multiIndexes) out.push(`  index (${ix.cols.join(', ')})`);
+    for (const ix of t.multiIndexes) out.push(`  index (${ix.cols.map(c => c.name).join(', ')})`);
   });
   return out.join('\n') + '\n';
 }

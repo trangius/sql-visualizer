@@ -54,6 +54,10 @@
     <svg width="14" height="14" class="ico thin" aria-hidden="true"><rect x="1" y="1.5" width="4" height="11" rx="1"/><circle cx="5" cy="9.5" r="1.2" fill="currentColor"/><path d="M6.5 9.5h2V4.5h1.3"/><path d="M10.2 2.8 12.6 4.5l-2.4 1.7z" fill="currentColor"/></svg>
     <span class="lbl">Implicit links</span>
   </button>
+  <button id="indexesBtn" class="tool" aria-pressed="true" title="Show indexes: idx on a column with one of its own, an index (A, B) line under its table for one over several">
+    <svg width="14" height="14" class="ico thin" aria-hidden="true"><path d="M2 3h6M2 7h10M2 11h6"/><path d="M10.5 9.5 12.5 11.5 10.5 13.5" /><path d="M10.5 1.5 12.5 3.5 10.5 5.5"/></svg>
+    <span class="lbl">Indexes</span>
+  </button>
   <div class="menu-wrap">
     <button id="notationBtn" class="tool" title="Relationship notation" aria-haspopup="menu" aria-expanded="false"><span id="notationIco"></span><span class="lbl">Notation</span></button>
     <div id="notationMenu" class="menu" role="menu" hidden>
@@ -220,7 +224,7 @@
           <code class="t-flag">unique (A, B)</code><div>The combination is unique. Here: one dog per place at each show.</div>
           <code class="t-flag">index</code><div>An index on the column, so searches and JOINs on it are fast. <b>index (A, B)</b> for one over several columns.</div>
           <code class="t-arrow">-&gt; Table</code><div>Foreign key to that table's primary key. The column inherits its type.</div>
-          <code class="t-arrow">-&gt; T.Col</code><div>Foreign key to a specific (PK or unique) column.</div>
+          <code class="t-arrow">-&gt; T.Col</code><div>Foreign key to a specific (PK or unique) column. MariaDB also takes one an <b>index</b> starts with.</div>
           <code class="t-flag">[delete cascade]</code><div>Last on a <b>-&gt;</b> line: deleting the row it points to deletes this row too. <b>[delete set null]</b> empties the column instead (it must be <b>null</b>); <b>[update cascade]</b> follows a changed key.</div>
           <code class="t-flag">[default 0]</code><div>The value when an INSERT leaves the column out: a number, <b>'text'</b>, <b>true</b>, <b>false</b> or <b>now</b>. Several go together: <b>[delete cascade, default 1]</b>.</div>
           <code class="t-arrow">OwnerId</code><div>With <b>Implicit</b> on (top bar), a column named table + Id gets an arrow to that table's PK, even without <b>-&gt;</b>. Diagram only: not a foreign key in the SQL.</div>
@@ -385,11 +389,21 @@
   <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="tdTitle">
     <h2 id="tdTitle">New table</h2>
     <label class="field">Table name <input id="tdName" spellcheck="false" autocomplete="off"></label>
-    <div class="col-grid col-head">
-      <span></span><span>Column</span><span>Type</span><span></span><span>Foreign key</span><span></span>
+    <div class="dlg-tabs" role="tablist" aria-label="Columns or indexes">
+      <button role="tab" data-tab="cols" aria-controls="tdColsPane">Columns</button>
+      <button role="tab" data-tab="idx" aria-controls="tdIdxPane">Indexes</button>
     </div>
-    <div id="tdCols"></div>
-    <button id="tdAdd" class="btn-outline">+ Add column</button>
+    <div id="tdColsPane" role="tabpanel">
+      <div class="col-grid col-head">
+        <span></span><span>Column</span><span>Type</span><span></span><span>Foreign key</span><span></span>
+      </div>
+      <div id="tdCols"></div>
+      <button id="tdAdd" class="btn-outline">+ Add column</button>
+    </div>
+    <div id="tdIdxPane" role="tabpanel" hidden>
+      <div id="tdIdx"></div>
+      <button id="tdAddIdx" class="btn-outline">+ Add index</button>
+    </div>
     <div class="dlg-actions">
       <button id="tdDelete" class="btn-outline danger">Delete table</button>
       <span class="spacer"></span>

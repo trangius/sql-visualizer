@@ -27,14 +27,44 @@ const CASES = {
   Created datetime
   Total int
   index (CustomerId, Created, Total)
+  index (Total)  # also the index line over one column
 `],
+  // a foreign key may point at a column that is no key where an index begins with it: on MariaDB (and MySQL before 8.4)
+  'fk to an indexed column': [`Owner
+  Id
+  Email vc(100) index
+  Name
+  Phone vc(20)
+  index (Name, Phone)
+Pet
+  Id
+  OwnerEmail vc(100) -> Owner.Email [delete cascade]
+  OwnerName -> Owner.Name
+`, Object.fromEntries(['mysql', 'sqlite', 'postgres', 'mssql', 'oracle'].map(d => [d, 'points no foreign key at Owner.Email, which is no key: make it the primary key or unique']))],
   'fk to a column without an index': [`Owner
   Id
   Email
 Pet
   Id
   OwnerEmail -> Owner.Email
-`, { oracle: 'Oracle needs Owner.Email', mysql: 'MySQL needs Owner.Email', sqlite: 'SQLite needs Owner.Email to be the primary key or unique', postgres: 'PostgreSQL needs Owner.Email', mssql: 'SQL Server needs Owner.Email' }],
+`, 'A foreign key needs Owner.Email to be the primary key or unique'],
+  'index over a text column': [`Note
+  Id
+  Body text index
+`, { mariadb: "MariaDB can't make an index over Body (text). Use varchar(n) instead", mysql: "MySQL can't make an index over Body (text). Use varchar(n) instead",
+    mssql: "SQL Server can't make an index over Body (text). Use varchar(n) instead", oracle: "Oracle can't make an index over Body (text). Use varchar(n) instead" }],
+  'index over a long vc': [`Note
+  Id
+  Title vc(1000)
+  index (Title, Id)
+`, { mariadb: "MariaDB can't make an index over Title (vc(1000)). Use a shorter varchar(n)", mysql: "MySQL can't make an index over Title (vc(1000)). Use a shorter varchar(n)" }],
+  // names cut to the database's length are numbered where they meet: each database keeps them apart
+  'long index names': [`AVeryLongTableNameThatGoesOnAndOnAndOnForeverAndEver
+  Id
+  AnotherExtremelyLongColumnNameNumberOne int index
+  AnotherExtremelyLongColumnNameNumberTwo int index
+  index (AnotherExtremelyLongColumnNameNumberTwo, AnotherExtremelyLongColumnNameNumberOne)
+`],
   'fk to the second column of a key': [`OrderLine
   OrderNo int
   LineNo int
@@ -42,7 +72,7 @@ Pet
 Shipment
   Id
   LineNo -> OrderLine.LineNo
-`, { oracle: 'Oracle needs OrderLine.LineNo', mysql: 'MySQL needs OrderLine.LineNo', sqlite: 'SQLite needs OrderLine.LineNo', postgres: 'PostgreSQL needs', mssql: 'SQL Server needs' }],
+`, 'A foreign key needs OrderLine.LineNo to be the primary key or unique'],
   // arrows to every column of a key over several columns are one foreign key: Return's is added after the
   // tables (they point at each other), Refund's is to a unique (…)
   'fk over keys of several columns': [`Return
@@ -72,7 +102,8 @@ Box
   Id
   Aisle -> Shelf.Aisle
   Bay -> Shelf.Bay
-`, { oracle: 'Oracle needs Shelf.Bay', mysql: 'MySQL needs Shelf.Aisle', sqlite: 'SQLite needs Shelf.Bay', postgres: 'PostgreSQL needs Shelf.Aisle', mssql: 'SQL Server needs Shelf.Bay' }],
+`, { mariadb: 'A foreign key needs Shelf.Bay', mysql: 'MySQL points no foreign key at Shelf.Aisle', sqlite: 'SQLite points no foreign key at Shelf.Aisle',
+    postgres: 'PostgreSQL points no foreign key at Shelf.Aisle', mssql: 'SQL Server points no foreign key at Shelf.Aisle', oracle: 'Oracle points no foreign key at Shelf.Aisle' }],
   // Room and Number are one foreign key; Spare, left over, is one of its own
   'fk to a key column once more': [`Seat
   Room int
@@ -83,7 +114,7 @@ Ticket
   Room -> Seat.Room
   Number -> Seat.Number
   Spare -> Seat.Number
-`, { oracle: 'Oracle needs Seat.Number', mysql: 'MySQL needs Seat.Number', sqlite: 'SQLite needs Seat.Number', postgres: 'PostgreSQL needs Seat.Number', mssql: 'SQL Server needs Seat.Number' }],
+`, 'A foreign key needs Seat.Number to be the primary key or unique'],
   // two foreign keys to one key: the first arrow to each of its columns, then the next
   'two fks to one key': [`City
   Name vc(40)
@@ -159,7 +190,8 @@ Pet
 Note
   Id
   TagBody -> Tag.Body
-`, { mariadb: "Tag.Body is text, which can't be part of a foreign key", mysql: "MySQL can't make a key or index of Body", oracle: "Oracle can't make a key or index of Body", mssql: "SQL Server can't make a key or index of Body" }],
+`, { mariadb: "Tag.Body is text, which can't be part of a foreign key", mysql: "MySQL can't make a unique key over Body (text). Use varchar(n) instead",
+    oracle: "Oracle can't make a unique key over Body (text)", mssql: "SQL Server can't make a unique key over Body (text)" }],
   'fk between strings of different lengths': [`Country
   Code char(2) pk
 City
@@ -318,7 +350,7 @@ Route
 Other
   Id
   Ref int -> AVeryLongTableNameThatGoesOnAndOnAndOnForever.AnotherExtremelyLongColumnNameNumberTwo
-`, { oracle: 'Oracle needs', mysql: 'MySQL needs', sqlite: 'SQLite needs', postgres: 'PostgreSQL needs', mssql: 'SQL Server needs' }],
+`, 'A foreign key needs AVeryLongTableNameThatGoesOnAndOnAndOnForever.AnotherExtremelyLongColumnNameNumberTwo to be the primary key or unique'],
   'keywords as names': [`Order
   Id
   Group vc(20) unique
@@ -350,7 +382,8 @@ ALTER TABLE Course ADD CONSTRAINT course_ibfk_1 FOREIGN KEY (TeacherId) REFERENC
 CREATE TABLE IF NOT EXISTS "Author" ("Id" INTEGER PRIMARY KEY AUTOINCREMENT, [Name] TEXT NOT NULL, "Note", Born DATE DEFAULT CURRENT_DATE);
 CREATE TABLE "Order" (Id INTEGER PRIMARY KEY, "Group" TEXT NOT NULL CHECK ("Group" IN ('a', 'b''c')), AuthorId INTEGER REFERENCES Author(Id) ON DELETE CASCADE) WITHOUT ROWID;
 CREATE INDEX ix_name ON Author (Name);
-CREATE INDEX ix_name2 ON "Order" (AuthorId);`, { oracle: "Oracle can't make a key or index of Name", mysql: "MySQL can't make a key or index of Name", mssql: "SQL Server can't make a key or index of Name" }, 'sqlite'],
+CREATE INDEX ix_name2 ON "Order" (AuthorId);`, { mariadb: "MariaDB can't make an index over Name (text)", oracle: "Oracle can't make an index over Name (text)",
+    mysql: "MySQL can't make an index over Name (text)", mssql: "SQL Server can't make an index over Name (text)" }, 'sqlite'],
   'PostgreSQL script': [`SET statement_timeout = 0;
 SELECT pg_catalog.set_config('search_path', '', false);
 CREATE TABLE public.author (
@@ -424,6 +457,10 @@ const COMBINED = {
     ['Refund', ['ReturnCode', 'ReturnBatch'], 'Return', ['Code', 'Batch'], false]],
   'two fks to one key': ROUTE, 'two fks to one key, interleaved': ROUTE,
 };
+// The indexes of some CASES: [table, its columns]. Each is named IX_Table_Columns, in its CREATE TABLE where the
+// database makes it there (MariaDB's and MySQL's), else made right after its table.
+const INDEXED = { 'indexes': [['Order', ['CustomerId']], ['Order', ['CustomerId', 'Created', 'Total']], ['Order', ['Total']]],
+  'fk to an indexed column': [['Owner', ['Email']], ['Owner', ['Name', 'Phone']]] };
 // Types written another way, read back as others: uuid is CHAR(36) in MariaDB, every integer INTEGER in SQLite
 const LOSSY = { 'every type': DBS, 'fk of another integer type': ['sqlite'], 'fk of another sign': ['sqlite'], 'fk over a key of another type': ['sqlite'] };
 const parse = vm.runInContext(`(src, sql, dialect) => {
@@ -512,6 +549,27 @@ const RUN = {
         }
         if (/\bINDEX\b/.test(schema)) fail(where, 'an index for a key over several columns');
       }
+      if (INDEXED[name]) {
+        const D = DIALECTS[dialect], T = n => (D.schema ? D.q(D.schema) + '.' : '') + D.q(n), list = cols => cols.map(D.q).join(', ');
+        const lines = schema.split('\n');
+        for (const [table, cols] of INDEXED[name]) {
+          const ix = D.q(`IX_${table}_${cols.join('_')}`), start = lines.indexOf(`CREATE TABLE ${T(table)} (`), end = lines.indexOf(');', start);
+          let after = end + 1;
+          while (lines[after]?.startsWith('CREATE INDEX ')) after++;
+          const ok = D.inlineIndexes ? lines.slice(start, end).some(l => l.replace(/,$/, '') === `  INDEX ${ix} (${list(cols)})`)
+            : lines.slice(end + 1, after).includes(`CREATE INDEX ${ix} ON ${T(table)} (${list(cols)});`);
+          if (start < 0 || !ok) fail(where, `no index ${ix} over (${cols.join(', ')}) ${D.inlineIndexes ? 'in' : 'right after'} the CREATE TABLE of ${table}`);
+        }
+        if ((schema.match(/\bINDEX\b/g) ?? []).length !== INDEXED[name].length) fail(where, 'an index nobody asked for');
+        // MariaDB points a foreign key at a column an index begins with, which is said
+        if (name === 'fk to an indexed column' && r.problems.filter(p => / only begins an index: few engines can point a foreign key at it/.test(p.msg)).length !== 2) {
+          fail(where, 'no warning about the foreign keys to indexes: ' + JSON.stringify(r.problems.map(p => p.msg)));
+        }
+      }
+      if (name === 'long index names') { // cut to the length a name may have, they are numbered apart
+        const names = [...schema.matchAll(/\bINDEX (\S+)/g)].map(m => m[1].toLowerCase());
+        if (names.length !== 3 || new Set(names).size !== 3) fail(where, 'index names alike: ' + names.join(', '));
+      }
       if (name === 'stand-in types and shapes') {
         // a type the database hasn't is said, as the one that stands in for it; a shape is NULL in the sample rows,
         // and a table where one can't be gets none
@@ -522,7 +580,7 @@ const RUN = {
         if (!/INSERT INTO \S*Place/.test(script) || /POINT\(|'\w+ \w+'\)/.test(script.split('-- Sample data')[1].replace(/'[^']*'/g, ''))) fail(where, 'Place has no rows, or a made-up shape');
       }
       const max = vm.runInContext(`dialectOf('${dialect}').maxName`, ctx);
-      if (new RegExp(`\\b\\w{${max + 1},}\\b`).test(script.replace(/'[^']*'/g, ''))) fail(where, `a name longer than ${max} characters`);
+      if (isFinite(max) && new RegExp(`\\b\\w{${max + 1},}\\b`).test(script.replace(/'[^']*'/g, ''))) fail(where, `a name longer than ${max} characters`);
       if (!run[dialect]) continue;
       const res = RUN[dialect](script);
       if (res.status || res.stderr?.trim()) fail(where, res.stderr.trim() + '\n' + script);
