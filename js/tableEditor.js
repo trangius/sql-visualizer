@@ -9,23 +9,28 @@ const SELF = '\u0000self'; // a foreign key to the table being edited, whatever 
 const LINK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4.2 4.2 0 0 0 6 0l3-3a4.2 4.2 0 0 0-6-6l-1 1"/><path d="M14 10a4.2 4.2 0 0 0-6 0l-3 3a4.2 4.2 0 0 0 6 6l1-1"/></svg>';
 const GRIP_ICON = '<svg viewBox="0 0 10 16" aria-hidden="true"><circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/><circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></svg>';
 const MOVE_KEYS = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌥↑ / ⌥↓' : 'Alt+↑ / Alt+↓';
-// the column's yes/no options, as pills: [field, label]
-const FLAGS = [['pk', 'PK'], ['nullable', 'NULL'], ['unique', 'UNIQUE'], ['auto', 'AUTO']];
+// the column's yes/no options, as pills: [field, label]. What belongs to one column is on it (indexed: an index over it
+// alone); what spans several columns is on the Combined tab, a row each.
+const FLAGS = [['pk', 'PK'], ['nullable', 'NULL'], ['unique', 'UNIQUE'], ['indexed', 'INDEX'], ['auto', 'AUTO']];
+// what a Combined row is: [kind, label], the kind as the text's word for it
+const KINDS = [['pk', 'PK'], ['unique', 'UNIQUE'], ['index', 'INDEX']];
 
-const dlgEl = $('#tableDlg'), tdName = $('#tdName'), tdCols = $('#tdCols'), tdIdx = $('#tdIdx');
+const dlgEl = $('#tableDlg'), tdName = $('#tdName'), tdCols = $('#tdCols'), tdCombined = $('#tdCombined');
 $('#typeList').innerHTML = TYPE_SUGGESTIONS.map(t => `<option value="${t}">`).join('');
 
-// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, pk, nullable, unique, auto, ref, refCol, comment }],
-//        ixs: [{ chips: [{ col } | { written }], unique, comment }] }
+// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, pk, nullable, unique, indexed, auto, ref, refCol, comment }],
+//        rows: [{ kind, chips: [{ col } | { written }], comment }] }
 // dlg.fk: the open foreign-key chooser { row, table, usePk, col, filter }
 // dlg.start: the dialog as it opened (see snapshot), to tell whether closing loses anything
-// dlg.tab: the tab shown, 'cols' or 'idx'
-// dlg.ixs: the Indexes tab's rows, unique keys and indexes: the columns' UNIQUEs, then the unique (…) lines, then the
-// indexes, each over its columns in order, a chip each: one of dlg.cols (col), or a name that is no column of the table,
-// kept as written for the text to report. A UNIQUE row over one column is that column's UNIQUE on the Columns tab.
+// dlg.tab: the tab shown, 'cols' or 'combined'
+// cols[].pk: the key alone (written pk); a column of a key over several columns is a chip of the PK row instead
+// dlg.rows: the Combined tab's rows, keys and indexes over several columns: the primary key (kind 'pk', one row at most),
+// then unique keys and indexes, each over its columns in order, a chip each: one of dlg.cols (col), or a name that is no
+// column of the table, kept as written for the text to report. A row over one column is that column's PK, UNIQUE or INDEX
+// once the dialog opens or saves (foldRows), not while it is edited.
 let dlg = null;
 
-const blankCol = () => ({ name: '', origName: null, type: '', pk: false, nullable: false, unique: false, auto: false, ref: null, refCol: null, comment: '' });
+const blankCol = () => ({ name: '', origName: null, type: '', pk: false, nullable: false, unique: false, indexed: false, auto: false, ref: null, refCol: null, comment: '' });
 const inlineComment = line => { const i = commentAt(line ?? ''); return i >= 0 ? line.slice(i).trim() : ''; };
 const lc = s => s.toLowerCase();
 const keyed = (cls, h) => ` class="${cls}${h == null ? '' : ' h-hue'}"${h == null ? '' : ` style="--h:${h}"`}`; // an element in a key's colour
@@ -74,29 +79,33 @@ function openTableEditor(name, at = null, col = null) {
   dlg = { orig: t?.name ?? null, at, tables, fk: null, nameComment: t ? inlineComment(lines[t.line - 1]) : '' };
   dlg.cols = t
     ? t.cols.map(c => ({
-        name: c.name, origName: c.name, type: c.type ?? '', pk: c.pk || (!!t.pkLine && c.isPk), nullable: c.nullable, unique: c.unique, auto: c.auto,
+        name: c.name, origName: c.name, type: c.type ?? '', pk: false, nullable: c.nullable, unique: c.unique, indexed: false, auto: c.auto,
         ref: !c.ref ? null : c.target === t || (!c.target && lc(c.ref) === lc(t.name)) ? SELF : c.target?.name ?? c.ref,
         refCol: !c.ref ? null : !c.target ? c.refCol : pointsToPk(c) ? null : c.targetCol.name,
         onDelete: c.onDelete, onUpdate: c.onUpdate, default: c.default, // kept as they are: the dialog doesn't edit them
         comment: inlineComment(lines[c.line - 1]),
       }))
     : [{ ...blankCol(), name: 'Id' }, blankCol()];
-  // a key's or an index's own line keeps its comment; one written after a column is the column's
-  const ixRow = (names, unique, line) => ({ unique, comment: t.cols.some(c => c.line === line) ? '' : inlineComment(lines[line - 1]),
+  // The keys and indexes as rows, those over one column then its pills: the primary key as written (its pk (…) line,
+  // else the columns marked pk), the unique keys, the indexes. A key's or an index's own line keeps its comment; one
+  // written after a column is the column's.
+  const fromText = (kind, names, line) => ({ kind, comment: line && !t.cols.some(c => c.line === line) ? inlineComment(lines[line - 1]) : '',
     chips: names.map(n => { const col = dlg.cols.find(c => lc(c.name) === lc(n)); return col ? { col } : { written: n }; }) });
-  dlg.ixs = t ? [
-    ...dlg.cols.filter(c => c.unique).map(col => ({ unique: true, comment: '', chips: [{ col }] })),
-    ...(t.uniques ?? []).filter(u => u.cols.length > 1 || !colNamed(t, u.cols[0])).map(u => ixRow(u.cols, true, u.line)),
-    ...(t.indexes ?? []).map(ix => ixRow(ix.cols, false, ix.line)),
+  const keyNames = t?.pkLine?.cols ?? t?.cols.filter(c => c.pk).map(c => c.name) ?? [];
+  dlg.rows = t ? [
+    ...(keyNames.length ? [fromText('pk', keyNames, t.pkLine?.line)] : []),
+    ...(t.uniques ?? []).map(u => fromText('unique', u.cols, u.line)),
+    ...(t.indexes ?? []).map(ix => fromText('index', ix.cols, ix.line)),
   ] : [];
+  foldRows();
   $('#tdTitle').textContent = t ? `Edit table ${t.name}` : 'New table';
   $('#tdDelete').hidden = !t;
   disarmDelete();
   tdName.value = t ? t.name : '';
   clearError();
-  showTab('cols');
   renderCols();
-  renderIndexes();
+  renderCombined();
+  showTab('cols');
   dlg.start = snapshot();
   dlgEl.hidden = false;
   const colIn = col != null && tdCols.querySelector(`.col-row[data-i="${dlg.cols.findIndex(c => c.name === col)}"] .c-name`);
@@ -110,9 +119,9 @@ function closeTableEditor() {
   dlg = null;
 }
 
-// The name, the columns and the indexes that would be saved (empty rows aren't)
+// The name, the columns and the keys and indexes that would be saved (empty rows aren't)
 const snapshot = () => JSON.stringify([tdName.value, dlg.cols.filter(c => c.name.trim() || c.type.trim() || c.ref),
-  dlg.ixs.map(ix => [ix.unique, ix.chips.map(chipName)])]);
+  dlg.rows.map(r => [r.kind, r.chips.map(chipName)])]);
 
 // Esc and a click outside ask before throwing edits away (Cancel says what it does, so it doesn't)
 async function requestClose() {
@@ -131,13 +140,13 @@ async function requestClose() {
 // Tables to choose from, alphabetically, with the table being edited as it is in the dialog right now
 function targetTables() {
   const selfName = tdName.value.trim() || dlg.orig || 'this table';
-  const explicitPk = dlg.cols.some(c => c.pk && c.name.trim());
+  const explicitPk = writesKey();
   const self = {
     key: SELF, name: selfName, self: true,
     cols: dlg.cols.filter(c => c.name.trim()).map(c => ({
       name: c.name.trim(),
       type: c.type.trim() || (isIdName(c.name.trim()) || c.ref ? 'int' : 'vc'),
-      isPk: c.pk || (!explicitPk && isIdName(c.name.trim())),
+      isPk: c.pk || inKeyRow(c) || (!explicitPk && isIdName(c.name.trim())),
       unique: c.unique,
     })),
   };
@@ -191,17 +200,19 @@ function setPill(b, on, { locked = false, gone = false, title }) {
   b.title = title;
 }
 
-// Placeholders and pills that depend on other fields (Id is the PK unless another column says pk)
+// Placeholders and pills that depend on other fields (Id is the PK unless another column says pk, or a PK row is over
+// columns), and the line that says a key over several columns is on the Combined tab
 function refreshHints() {
-  const explicitPk = dlg.cols.some(c => c.pk && c.name.trim());
+  const explicitPk = writesKey(), key = keyRow();
   const pkCount = dlg.cols.filter(c => c.pk && c.name.trim()).length;
   for (const row of tdCols.querySelectorAll('.col-row')) {
     const c = dlg.cols[+row.dataset.i];
     const pill = f => row.querySelector(`.pill[data-f="${f}"]`);
     const isId = isIdName(c.name.trim());
-    const autoPk = !explicitPk && isId;
-    const isPk = c.pk || autoPk;
-    setPill(pill('pk'), isPk, { locked: autoPk, title: autoPk ? 'Id is the primary key automatically' : 'Primary key' });
+    const autoPk = !explicitPk && isId, combined = inKeyRow(c), alone = c.pk || autoPk;
+    const isPk = alone || combined;
+    setPill(pill('pk'), isPk, { locked: autoPk || combined, title: combined ? 'In the primary key over several columns: change it on Combined'
+      : autoPk ? 'Id is the primary key automatically' : 'Primary key' });
     // a primary key column in the table's colour, as in the diagram
     const hue = isPk ? tableHue(SELF) : null;
     for (const el of [pill('pk'), row.querySelector('.c-name')]) {
@@ -212,8 +223,11 @@ function refreshHints() {
     if (isPk) c.nullable = false;
     setPill(pill('nullable'), c.nullable, { gone: isPk, title: 'May be NULL' });
     setPill(pill('unique'), c.unique, { title: 'UNIQUE' });
+    // an index of its own adds nothing to a key's
+    setPill(pill('indexed'), c.indexed, { locked: alone || c.unique, title: alone || c.unique
+      ? `Indexed already, as ${c.unique ? 'a unique column' : 'the primary key'}` : 'INDEX: an index over this column alone' });
     // auto_increment: only an integer column that is the primary key on its own; such an Id has it already
-    const canAuto = (autoPk || (c.pk && pkCount === 1)) && INT_TYPES.has(typeParts(normType(c.type.trim() || 'int')).base);
+    const canAuto = (autoPk || (c.pk && pkCount === 1 && !key?.chips.length)) && INT_TYPES.has(typeParts(normType(c.type.trim() || 'int')).base);
     const implied = canAuto && isId;
     if (!canAuto) c.auto = false;
     setPill(pill('auto'), canAuto && (c.auto || implied), {
@@ -221,6 +235,9 @@ function refreshHints() {
     });
     row.querySelector('.c-type').placeholder = isId || c.ref ? 'int' : 'vc';
   }
+  const hint = $('#tdKeyHint');
+  hint.hidden = !key?.chips.length;
+  if (key) hint.textContent = `The primary key is over ${key.chips.map(ch => chipName(ch) || 'no name').join(', ')}: change it on Combined.`;
 }
 
 tdCols.addEventListener('input', e => {
@@ -243,11 +260,14 @@ tdCols.addEventListener('click', e => {
   const i = +b.closest('.col-row').dataset.i, cols = dlg.cols;
   switch (act) {
     case 'flag': {
-      const on = b.getAttribute('aria-pressed') !== 'true';
-      if (b.dataset.f === 'unique') setColumnUnique(cols[i], on); else cols[i][b.dataset.f] = on;
+      const on = b.getAttribute('aria-pressed') !== 'true', f = b.dataset.f;
+      if (f === 'pk') setColumnKey(cols[i], on);
+      else cols[i][f] = on;
+      if (f === 'unique' && on) cols[i].indexed = false; // an index of its own adds nothing to a key's
+      if (f === 'pk') renderCombined();
       return refreshHints();
     }
-    case 'del': dropIndexColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; renderIndexes(); break;
+    case 'del': dropCombinedColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; renderCombined(); break;
     case 'unlink': cols[i].ref = cols[i].refCol = null; if (dlg.fk?.row === i) dlg.fk = null; break;
     case 'fk': return openFk(i);
   }
@@ -301,7 +321,7 @@ function addColumn() {
 }
 $('#tdAdd').onclick = addColumn;
 
-// ─── Tabs: Columns, Indexes ──────────────────────────────────────────────────
+// ─── Tabs: Columns, Combined ─────────────────────────────────────────────────
 
 function showTab(tab) {
   dlg.tab = tab;
@@ -311,96 +331,137 @@ function showTab(tab) {
     b.tabIndex = b.dataset.tab === tab ? 0 : -1;
   }
   $('#tdColsPane').hidden = tab !== 'cols';
-  $('#tdIdxPane').hidden = tab !== 'idx';
-  if (tab === 'idx') renderIndexes(); // the columns' names as typed
+  $('#tdCombinedPane').hidden = tab !== 'combined';
+  if (tab === 'combined') renderCombined(); // the columns' names as typed
+  else refreshHints(); // the pills as the rows say
 }
 for (const b of dlgEl.querySelectorAll('.dlg-tabs [data-tab]')) b.onclick = () => { if (dlg.fk) closeFk(); showTab(b.dataset.tab); };
 // ← → between the tabs, as a tab list does
 dlgEl.querySelector('.dlg-tabs').addEventListener('keydown', e => {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
   e.preventDefault();
-  const tab = dlg.tab === 'cols' ? 'idx' : 'cols';
+  const tab = dlg.tab === 'cols' ? 'combined' : 'cols';
   showTab(tab);
   dlgEl.querySelector(`.dlg-tabs [data-tab="${tab}"]`).focus();
 });
 
-// ─── Index rows: unique keys and indexes, each over its columns in order ─────
+// ─── Combined rows: keys and indexes over several columns ────────────────────
 
 // A chip's name as it stands: its column's as typed, else the name it was written with; '' for a column with none
 const chipName = ch => ch.col ? ch.col.name.trim() : ch.written;
-// Whether a UNIQUE row is over the column alone: its UNIQUE
-const uniqueAlone = c => dlg.ixs.some(ix => ix.unique && ix.chips.length === 1 && ix.chips[0].col === c);
-// The Indexes tab changed: each column's UNIQUE follows it
-const syncUniques = () => { for (const c of dlg.cols) c.unique = uniqueAlone(c); };
+// The row that is the primary key, if any, and whether a column is one of its chips
+const keyRow = () => dlg.rows.find(r => r.kind === 'pk') ?? null;
+const inKeyRow = c => !!keyRow()?.chips.some(ch => ch.col === c);
+// Whether the dialog writes a primary key: a named column ticked PK, or a PK row over a column. Then no Id is the key
+// by its name.
+const writesKey = () => dlg.cols.some(c => c.pk && c.name.trim()) || !!keyRow()?.chips.length;
+// The columns that are the key alone, but `except`: those ticked PK, else, while no PK row is over a column, an Id by
+// its name
+function keyAlone(except) {
+  const ticked = dlg.cols.filter(c => c !== except && c.pk && c.name.trim());
+  if (ticked.length || keyRow()?.chips.length) return ticked;
+  return dlg.cols.filter(c => c !== except && isIdName(c.name.trim()));
+}
+// The columns added to the end of the row, those not in it yet
+const addChips = (row, cols) => { for (const col of cols) if (!row.chips.some(ch => ch.col === col)) row.chips.push({ col }); };
 
-// The Columns tab's UNIQUE of a column ticked or not: a UNIQUE row over it alone added, or those there are gone
-function setColumnUnique(c, on) {
-  if (on && !uniqueAlone(c)) dlg.ixs.push({ unique: true, comment: '', chips: [{ col: c }] });
-  if (!on) dlg.ixs = dlg.ixs.filter(ix => !(ix.unique && ix.chips.length === 1 && ix.chips[0].col === c));
-  syncUniques();
-  renderIndexes();
+// Each row over one named column of the table, that column's PK, UNIQUE or INDEX
+function foldRows() {
+  dlg.rows = dlg.rows.filter(r => {
+    const named = r.chips.filter(chipName);
+    if (named.length !== 1 || !named[0].col) return true;
+    named[0].col[{ pk: 'pk', unique: 'unique', index: 'indexed' }[r.kind]] = true;
+    return false;
+  });
 }
 
-// A column removed: a unique key over it goes, as dropping the column takes it along; an index loses it, and goes
-// where it is over none then
-function dropIndexColumn(c) {
-  dlg.ixs = dlg.ixs.filter(ix => {
-    const at = ix.chips.findIndex(ch => ch.col === c);
+// PK on a column ticked or not. Ticked where another column is the key alone (ticked, or an Id by its name) or a PK
+// row is there, they are one key over several columns: the PK row, this column last.
+function setColumnKey(c, on) {
+  c.pk = on;
+  if (!on) return;
+  c.indexed = false;
+  let row = keyRow();
+  const others = keyAlone(c);
+  if (!row && !others.length) return;
+  if (!row) dlg.rows.unshift(row = { kind: 'pk', chips: [], comment: '' });
+  addChips(row, [...others, c]);
+  for (const o of [...others, c]) o.pk = false;
+}
+
+// A row's kind picked. Made PK (while no other row is), the columns that were the key alone join it first, in order.
+function setRowKind(row, kind) {
+  if (kind === row.kind || (kind === 'pk' && keyRow())) return;
+  if (kind === 'pk') {
+    const alone = keyAlone(null);
+    for (const c of alone) c.pk = false;
+    row.chips.unshift(...alone.filter(c => !row.chips.some(ch => ch.col === c)).map(col => ({ col })));
+  }
+  row.kind = kind;
+}
+
+// A column removed: a unique key over it goes, as dropping the column takes it along; the primary key and an index
+// lose it, and keep their other columns
+function dropCombinedColumn(c) {
+  dlg.rows = dlg.rows.filter(r => {
+    const at = r.chips.findIndex(ch => ch.col === c);
     if (at < 0) return true;
-    if (ix.unique || ix.chips.length === 1) return false;
-    ix.chips.splice(at, 1);
+    if (r.kind === 'unique') return false;
+    r.chips.splice(at, 1);
     return true;
   });
-  syncUniques();
 }
 
-function renderIndexes() {
-  tdIdx.innerHTML = dlg.ixs.map((ix, i) => {
-    const chips = ix.chips.map((ch, k) => {
+// A row: its kind; its columns as chips in its order in a field as wide on every row, wrapping onto more lines, a + at
+// their end that lists the others; ×. The table has one primary key: PK is offered to the row that is it, or to any
+// while none is.
+function renderCombined() {
+  const key = keyRow();
+  tdCombined.innerHTML = dlg.rows.map((r, i) => {
+    const taken = key && key !== r;
+    const kinds = KINDS.map(([k, label]) => `<option value="${k}"${k === r.kind ? ' selected' : ''}${k === 'pk' && taken ? ' disabled' : ''}>${label}</option>`).join('');
+    const chips = r.chips.map((ch, k) => {
       const name = chipName(ch), lost = !ch.col || !name; // a name no column has, or a column with no name to save under
-      return `<span class="ix-chip${lost ? ' lost' : ''}" title="${lost ? (ch.col ? 'This column has no name yet' : `${esc(name)} is no column of this table`) : ''}">` +
-        `${esc(name || 'no name')}<button data-act="ix-chip" data-k="${k}" title="Take ${esc(name || 'it')} out" aria-label="Take ${esc(name || 'it')} out">×</button></span>`;
+      return `<span class="cb-chip${lost ? ' lost' : ''}" title="${lost ? (ch.col ? 'This column has no name yet' : `${esc(name)} is no column of this table`) : ''}">` +
+        `${esc(name || 'no name')}<button data-act="cb-chip" data-k="${k}" title="Take ${esc(name || 'it')} out" aria-label="Take ${esc(name || 'it')} out">×</button></span>`;
     }).join('');
-    const choices = dlg.cols.map((c, j) => [c, j]).filter(([c]) => c.name.trim() && !ix.chips.some(ch => ch.col === c));
-    return `<div class="ix-row" data-ix="${i}">
-      <div class="ix-cols">${chips}<select class="ix-add" aria-label="Add a column to this index"${choices.length ? '' : ' disabled'}>` +
-        `<option value="">Add column</option>${choices.map(([c, j]) => `<option value="${j}">${esc(c.name.trim())}</option>`).join('')}</select></div>
-      <button class="pill" data-act="ix-unique" aria-pressed="${ix.unique}" title="UNIQUE: no two rows have the same ${ix.chips.length > 1 ? 'values in these columns' : 'value here'}">UNIQUE</button>
-      <button class="icon-x" data-act="ix-del" title="Remove ${ix.unique ? 'unique key' : 'index'}" aria-label="Remove ${ix.unique ? 'unique key' : 'index'}">×</button>
+    const choices = dlg.cols.map((c, j) => [c, j]).filter(([c]) => c.name.trim() && !r.chips.some(ch => ch.col === c));
+    const what = { pk: 'primary key', unique: 'unique key', index: 'index' }[r.kind];
+    return `<div class="cb-row" data-r="${i}">
+      <select class="cb-kind" aria-label="Kind" title="${taken ? 'The table has a primary key: another row is PK' : 'Primary key, unique key or index'}">${kinds}</select>
+      <div class="cb-cols">${chips}<select class="cb-add" aria-label="Add a column" title="Add a column"${choices.length ? '' : ' disabled'}>` +
+        `<option value="" hidden selected>+</option>${choices.map(([c, j]) => `<option value="${j}">${esc(c.name.trim())}</option>`).join('')}</select></div>
+      <button class="icon-x" data-act="cb-del" title="Remove this ${what}" aria-label="Remove this ${what}">×</button>
     </div>`;
-  }).join('') || '<div class="ix-empty">No indexes or unique keys yet. An index makes searches and joins on its columns fast; a column\'s UNIQUE on the Columns tab is one too.</div>';
+  }).join('') || '<div class="cb-empty">Nothing over several columns yet. A primary key, unique key or index over two or more columns goes here; one over a single column is that column\'s PK, UNIQUE or INDEX on the Columns tab.</div>';
 }
 
-tdIdx.addEventListener('click', e => {
+tdCombined.addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
   if (!b) return;
-  const i = +b.closest('.ix-row').dataset.ix, ix = dlg.ixs[i];
-  if (b.dataset.act === 'ix-chip') ix.chips.splice(+b.dataset.k, 1);
-  else if (b.dataset.act === 'ix-unique') ix.unique = !ix.unique;
-  else if (b.dataset.act === 'ix-del') dlg.ixs.splice(i, 1);
-  syncUniques();
-  renderIndexes();
-  refreshHints();
-  // the focus stays in the row: on its list once a chip is gone, else on the button clicked
-  const row = tdIdx.querySelector(`.ix-row[data-ix="${Math.min(i, dlg.ixs.length - 1)}"]`);
-  (b.dataset.act === 'ix-unique' ? row?.querySelector('[data-act="ix-unique"]') : row?.querySelector('.ix-add:not(:disabled)') ?? row?.querySelector('button'))?.focus();
+  const i = +b.closest('.cb-row').dataset.r;
+  if (b.dataset.act === 'cb-chip') dlg.rows[i].chips.splice(+b.dataset.k, 1);
+  else if (b.dataset.act === 'cb-del') dlg.rows.splice(i, 1);
+  renderCombined();
+  // the focus stays in the row: on its + once a chip is gone, else on the next row's ×
+  const row = tdCombined.querySelector(`.cb-row[data-r="${Math.min(i, dlg.rows.length - 1)}"]`);
+  ((b.dataset.act === 'cb-chip' && row?.querySelector('.cb-add:not(:disabled)')) || row?.querySelector('[data-act="cb-del"]'))?.focus();
 });
-tdIdx.addEventListener('change', e => {
-  if (!e.target.classList.contains('ix-add') || e.target.value === '') return;
-  const i = +e.target.closest('.ix-row').dataset.ix;
-  dlg.ixs[i].chips.push({ col: dlg.cols[+e.target.value] });
-  syncUniques();
-  renderIndexes();
-  refreshHints();
-  tdIdx.querySelector(`.ix-row[data-ix="${i}"] .ix-add`)?.focus();
+tdCombined.addEventListener('change', e => {
+  const sel = e.target, i = +sel.closest('.cb-row')?.dataset.r;
+  if (sel.classList.contains('cb-kind')) setRowKind(dlg.rows[i], sel.value);
+  else if (sel.classList.contains('cb-add') && sel.value !== '') addChips(dlg.rows[i], [dlg.cols[+sel.value]]);
+  else return;
+  renderCombined();
+  tdCombined.querySelector(`.cb-row[data-r="${i}"] .${sel.classList.contains('cb-kind') ? 'cb-kind' : 'cb-add'}`)?.focus();
 });
-function addIndex() {
-  showTab('idx');
-  dlg.ixs.push({ unique: false, comment: '', chips: [] });
-  renderIndexes();
-  tdIdx.querySelector(`.ix-row[data-ix="${dlg.ixs.length - 1}"] .ix-add`)?.focus();
+function addCombined() {
+  showTab('combined');
+  dlg.rows.push({ kind: 'index', chips: [], comment: '' });
+  renderCombined();
+  tdCombined.querySelector(`.cb-row[data-r="${dlg.rows.length - 1}"] .cb-kind`)?.focus();
 }
-$('#tdAddIdx').onclick = addIndex;
+$('#tdAddCombined').onclick = addCombined;
 
 // ─── Foreign-key chooser: table list, then primary key or a specific column ──
 
@@ -560,6 +621,7 @@ function saveTable() {
     return fail(tdName, `There is already a table named ${name}.`);
   }
 
+  foldRows(); // a row left over one column is that column's PK, UNIQUE or INDEX
   const rows = [...tdCols.querySelectorAll('.col-row')];
   const seen = new Set(), cols = [];
   for (const [i, c] of dlg.cols.entries()) {
@@ -570,32 +632,32 @@ function saveTable() {
     if (seen.has(lc(cn))) return fail(nameIn, `There are two columns named ${cn}.`);
     if (/#|->/.test(ct)) return fail(typeIn, 'The type can\'t contain # or ->.');
     seen.add(lc(cn));
-    cols.push({ ...c, name: cn, type: ct, of: c }); // of: its row, which the index rows' chips name
+    cols.push({ ...c, name: cn, type: ct });
   }
 
   // Columns renamed in the dialog: references to them (here and in other tables) follow along
   const renamed = new Map(cols.filter(c => c.origName && c.origName !== c.name).map(c => [lc(c.origName), c.name]));
   const toSelf = c => c.ref === SELF || (dlg.orig && c.ref && lc(c.ref) === lc(dlg.orig));
 
-  // The Indexes tab's rows, under their columns' names as saved: a UNIQUE one over one column is that column's unique,
-  // one over several a unique (…) line; an index over one column is its index, one over several an index (…) line.
-  // A column with no name leaves them, and a row over none is none; a name that was no column of the table stays as
-  // written (on a line of its own), for the text to report, and so does a line's comment.
-  const flagged = { unique: new Set(), index: new Set() }, keyLines = { unique: [], index: [] };
-  for (const ix of dlg.ixs) {
-    const chips = ix.chips.filter(chipName), word = ix.unique ? 'unique' : 'index';
-    if (chips.length === 1 && chips[0].col && !ix.comment) flagged[word].add(chips[0].col);
-    else if (chips.length) keyLines[word].push(`  ${word} (${chips.map(chipName).join(', ')})` + (ix.comment ? '  ' + ix.comment : ''));
+  // The Combined rows, under their columns' names as saved: the PK row the pk (…) line, the others unique (…) and
+  // index (…) lines, each with its comment. A column with no name leaves them, and a row over none is none; a name that
+  // was no column of the table stays as written, for the text to report.
+  const keyLines = { pk: [], unique: [], index: [] };
+  for (const r of dlg.rows) {
+    const names = r.chips.map(chipName).filter(Boolean);
+    if (names.length) keyLines[r.kind].push(`  ${r.kind} (${names.join(', ')})` + (r.comment ? '  ' + r.comment : ''));
   }
   const block = [name + (dlg.nameComment ? '  ' + dlg.nameComment : '')];
-  const pkLine = cols.filter(c => c.pk).length > 1; // a key over several columns gets its own line
+  // columns ticked PK that are one key together (only text written so, read as it was, can be) get a line too
+  const pkLine = keyLines.pk.length > 0 || cols.filter(c => c.pk).length > 1;
+  if (!keyLines.pk.length && pkLine) keyLines.pk.push(`  pk (${cols.filter(c => c.pk).map(c => c.name).join(', ')})`);
   for (const c of cols) {
     const parts = [c.name];
     if (c.type) parts.push(c.type);
     if (c.pk && !pkLine) parts.push('pk');
     if (c.nullable) parts.push('null');
-    if (flagged.unique.has(c.of)) parts.push('unique');
-    if (flagged.index.has(c.of)) parts.push('index');
+    if (c.unique) parts.push('unique');
+    if (c.indexed) parts.push('index');
     if (c.auto && !isIdName(c.name)) parts.push('auto_increment');
     if (c.ref) {
       const self = toSelf(c);
@@ -606,8 +668,7 @@ function saveTable() {
     if (opts.length) parts.push(`[${opts.join(', ')}]`);
     block.push('  ' + parts.join(' ') + (c.comment ? '  ' + c.comment : ''));
   }
-  if (pkLine) block.push(`  pk (${cols.filter(c => c.pk).map(c => c.name).join(', ')})`);
-  block.push(...keyLines.unique, ...keyLines.index);
+  block.push(...keyLines.pk, ...keyLines.unique, ...keyLines.index);
 
   histBegin(dlg.orig ? 'edit table' : 'new table');
   const lines = state.text.split('\n');

@@ -593,7 +593,7 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .dlg {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, .25); padding: 18px 20px;
-  width: 780px; max-width: 100%; max-height: calc(100vh - 32px); overflow: auto;
+  width: 840px; max-width: 100%; max-height: calc(100vh - 32px); overflow: auto;
 }
 .dlg h2 { font-size: 14.5px; font-weight: 600; margin: 0 0 14px; letter-spacing: -.01em; }
 .dlg input[type=text], .dlg input:not([type]) {
@@ -608,7 +608,7 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .field input { max-width: 280px; }
 .col-grid, .col-row {
   display: grid; gap: 6px; align-items: center;
-  grid-template-columns: 16px minmax(110px, 1.2fr) minmax(90px, .8fr) 174px minmax(150px, 1.6fr) 28px;
+  grid-template-columns: 16px minmax(110px, 1.2fr) minmax(90px, .8fr) 224px minmax(150px, 1.6fr) 28px;
 }
 .col-head { font-size: 11px; color: var(--muted); padding: 0 0 4px; text-transform: uppercase; letter-spacing: .06em; }
 .col-row { padding: 3px 0; }
@@ -618,8 +618,8 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .col-row:hover .grip { color: var(--muted); }
 .col-row.dragging { margin: 0 -6px; padding: 3px 6px; border-radius: 8px; background: var(--soft); box-shadow: var(--shadow); }
 #tdCols.reordering, #tdCols.reordering * { cursor: grabbing; user-select: none; }
-/* PK / NULL / UNIQUE / AUTO: filled when on, faint when off (outlined on hover); one that can't apply to the column is left out, in its place */
-.c-flags { display: grid; grid-template-columns: 30px 42px 54px 42px; gap: 2px; }
+/* PK / NULL / UNIQUE / INDEX / AUTO: filled when on, faint when off (outlined on hover); one that can't apply to the column is left out, in its place */
+.c-flags { display: grid; grid-template-columns: 30px 42px 54px 48px 42px; gap: 2px; }
 .pill {
   height: 24px; padding: 0; border: 1px solid transparent; border-radius: 12px; background: transparent;
   font: 500 10px var(--mono); letter-spacing: .03em; color: var(--faint);
@@ -628,7 +628,8 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .pill[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .pill[aria-pressed="true"]:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-fg); filter: brightness(1.08); }
 .pill:disabled { cursor: default; }
-.pill[aria-pressed="true"]:disabled { opacity: .6; } /* on because of the name (Id): not a choice */
+.pill[aria-pressed="true"]:disabled { opacity: .6; } /* on because of the name (Id) or a key over several columns: not a choice */
+.pill[aria-pressed="false"]:disabled { opacity: .35; } /* INDEX where the column's key indexes it already */
 .pill.gone { visibility: hidden; }
 .c-fk { display: flex; align-items: center; min-width: 0; }
 /* what a foreign key points to; its × (not a foreign key) shows on hover */
@@ -658,8 +659,10 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .icon-btn.link { width: 30px; height: 28px; border: 1px solid transparent; border-radius: 7px; color: var(--faint); }
 .icon-btn.link svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .col-row.fk-open .fk-chip, .col-row.fk-open .icon-btn.link { border-color: var(--accent); color: var(--accent); }
-#tdAdd, #tdAddIdx { margin: 8px 0 20px; }
-/* Columns / Indexes: the one shown underlined */
+#tdAdd, #tdAddCombined { margin: 8px 0 20px; }
+/* under + Add column: the primary key is over several columns, on the Combined tab */
+.key-hint { margin: -12px 0 18px; color: var(--muted); font-size: 12.5px; }
+/* Columns / Combined: the one shown underlined */
 .dlg-tabs { display: flex; gap: 4px; margin: -4px 0 12px; border-bottom: 1px solid var(--line); }
 .dlg-tabs button {
   height: 32px; padding: 0 10px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; background: none;
@@ -667,28 +670,39 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 }
 .dlg-tabs button:hover { color: var(--fg); }
 .dlg-tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
-/* an index or unique key: its columns as chips in order, a list that adds one, UNIQUE, × */
-#tdIdx { min-height: 74px; }
-.ix-row { display: grid; grid-template-columns: 1fr 54px 28px; gap: 6px; align-items: center; padding: 3px 0; }
-.ix-cols { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
-.ix-chip {
-  display: inline-flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 9px; border: 1px solid var(--line);
-  border-radius: 7px; background: var(--box-bg); font: 12.5px var(--mono); white-space: nowrap;
-}
-.ix-chip.lost { color: var(--err); border-color: var(--err); }
-.ix-chip button {
-  width: 22px; height: 22px; padding: 0; line-height: 1; border: 0; border-radius: 5px; background: none; color: var(--muted);
-}
-.ix-chip button:hover { background: var(--hover); color: var(--fg); }
-.ix-add {
-  height: 28px; padding: 0 28px 0 9px; border: 1px solid var(--line); border-radius: 7px; font: 12.5px var(--font); color: var(--muted);
-  appearance: none; -webkit-appearance: none; cursor: pointer; max-width: 160px;
+/* a key or index over several columns: its kind, its columns as chips in a field as wide on every row (wrapping), a +
+   at their end that adds one, × */
+#tdCombined { min-height: 74px; }
+.cb-row { display: grid; grid-template-columns: 104px 1fr 28px; gap: 6px; align-items: start; padding: 3px 0; }
+.cb-kind {
+  height: 32px; padding: 0 26px 0 9px; border: 1px solid var(--line); border-radius: 7px; font: 500 12px var(--mono); letter-spacing: .03em;
+  color: var(--fg); appearance: none; -webkit-appearance: none; cursor: pointer;
   background: var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a857c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 6px center;
 }
-.ix-add:hover:not(:disabled) { border-color: var(--line2); color: var(--fg); }
-.ix-add:disabled { opacity: .5; cursor: default; }
-.ix-add option { color: var(--fg); background: var(--panel); }
-.ix-empty { color: var(--muted); font-size: 12.5px; padding: 8px 0; line-height: 1.5; }
+.cb-kind:hover { border-color: var(--line2); }
+.cb-cols {
+  display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; min-width: 0; min-height: 32px; padding: 3px 4px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--box-bg);
+}
+.cb-chip {
+  display: inline-flex; align-items: center; gap: 1px; height: 24px; padding: 0 1px 0 8px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); font: 12.5px var(--mono); white-space: nowrap;
+}
+.cb-chip.lost { color: var(--err); border-color: var(--err); }
+.cb-chip button {
+  width: 20px; height: 20px; padding: 0; line-height: 1; border: 0; border-radius: 5px; background: none; color: var(--muted);
+}
+.cb-chip button:hover { background: var(--hover); color: var(--fg); }
+.cb-add {
+  height: 24px; width: 40px; padding: 0 18px 0 8px; border: 0; border-radius: 6px; font: 500 14px var(--font); color: var(--muted);
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14'%3E%3Cpath d='M3.5 5.5l3.5 3.5 3.5-3.5' fill='none' stroke='%238a857c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 3px center;
+}
+.cb-add:hover:not(:disabled), .cb-add:focus-visible { background-color: var(--hover); color: var(--fg); }
+.cb-add:disabled { opacity: .4; cursor: default; }
+.cb-add option, .cb-kind option { color: var(--fg); background: var(--panel); font: 13px var(--font); }
+.cb-row .icon-x { height: 32px; }
+.cb-empty { color: var(--muted); font-size: 12.5px; padding: 8px 0; line-height: 1.5; }
 /* why Save didn't: under the field it is about */
 .field-error { color: var(--err); font-size: 12.5px; margin: 0 0 6px; }
 .field + .field-error { margin: -10px 0 12px; }

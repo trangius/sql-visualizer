@@ -394,9 +394,9 @@
   <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="tdTitle">
     <h2 id="tdTitle">New table</h2>
     <label class="field">Table name <input id="tdName" spellcheck="false" autocomplete="off"></label>
-    <div class="dlg-tabs" role="tablist" aria-label="Columns or indexes">
+    <div class="dlg-tabs" role="tablist" aria-label="Columns, or keys and indexes over several columns">
       <button role="tab" data-tab="cols" aria-controls="tdColsPane">Columns</button>
-      <button role="tab" data-tab="idx" aria-controls="tdIdxPane">Indexes</button>
+      <button role="tab" data-tab="combined" aria-controls="tdCombinedPane" title="Primary keys, unique keys and indexes over several columns">Combined</button>
     </div>
     <div id="tdColsPane" role="tabpanel">
       <div class="col-grid col-head">
@@ -404,10 +404,11 @@
       </div>
       <div id="tdCols"></div>
       <button id="tdAdd" class="btn-outline">+ Add column</button>
+      <div id="tdKeyHint" class="key-hint" hidden></div>
     </div>
-    <div id="tdIdxPane" role="tabpanel" hidden>
-      <div id="tdIdx"></div>
-      <button id="tdAddIdx" class="btn-outline">+ Add index</button>
+    <div id="tdCombinedPane" role="tabpanel" hidden>
+      <div id="tdCombined"></div>
+      <button id="tdAddCombined" class="btn-outline">+ Add</button>
     </div>
     <div class="dlg-actions">
       <button id="tdDelete" class="btn-outline danger">Delete table</button>
