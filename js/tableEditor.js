@@ -862,7 +862,7 @@ canvasMenu.addEventListener('click', e => {
   const cmd = e.target.closest('[data-cmd]')?.dataset.cmd;
   if (!cmd) return;
   closeMenus();
-  if (cmd === 'new') openTableEditor(null, { x: snap(menuAt.x - 20), y: snap(menuAt.y - 15) }); // as a double-click there
+  if (cmd === 'new') openTableEditor(null, dragSpot(menuAt.x, menuAt.y, -20, -15, state.snap)); // as a double-click there
   else if (cmd === 'find') openFinder();
   else if (cmd === 'all') selectAll();
   else if (cmd === 'layout') layoutAndShow();
@@ -892,6 +892,6 @@ svg.addEventListener('dblclick', e => {
     openTableEditor(g.dataset.t, null, key ? key.slice(g.dataset.t.length + 1) : null);
   } else {
     const w = toWorld(e);
-    openTableEditor(null, { x: snap(w.x - 20), y: snap(w.y - 15) });
+    openTableEditor(null, dragSpot(w.x, w.y, -20, -15, state.snap && !e.altKey)); // on the grid with Snap on, but with ⌥
   }
 });

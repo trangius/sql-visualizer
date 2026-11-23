@@ -217,7 +217,7 @@ ta.addEventListener('input', () => {
 // `state` holds the preferences plus the active diagram's fields; `pos` its box positions.
 // Windows of the same browser share all of it: each merges the others' tabs into its own list
 // (syncDocs) and shows their changes to the diagram it has open (takeDoc).
-const SETTINGS = ['colors', 'fontSize', 'wrap', 'notation', 'implicit', 'keysOnly', 'indexes', 'dataView', 'panel', 'leftW'];
+const SETTINGS = ['colors', 'fontSize', 'wrap', 'notation', 'implicit', 'keysOnly', 'indexes', 'snap', 'dataView', 'panel', 'leftW'];
 // base: the text the diagram was created with (an example, or empty), to tell whether it has changed
 // sampleLang: the language of the data view's made-up rows, null = guessed from the names
 // dialect: the database the SQL is written for, a key of DIALECTS
@@ -324,7 +324,7 @@ window.addEventListener('storage', e => {
 });
 
 const state = Object.assign({
-  colors: 'bleak', fontSize: 13, wrap: true, notation: 'arrows', implicit: false, keysOnly: false, indexes: true, dataView: false, panel: 'mid', leftW: null, ...DOC_DEFAULTS,
+  colors: 'bleak', fontSize: 13, wrap: true, notation: 'arrows', implicit: false, keysOnly: false, indexes: true, snap: true, dataView: false, panel: 'mid', leftW: null, ...DOC_DEFAULTS,
 }, store.get('settings', {}));
 let pos = {};
 let docView = null; // the active diagram's saved pan/zoom, if any
@@ -624,6 +624,20 @@ $('#indexesBtn').onclick = () => {
   saveState();
 };
 applyIndexes();
+
+// Snap: a dragged or new table stands on the grid (a row's height), so rows line up and lines run straight;
+// Option (Alt) during a drag lets a table go where the mouse takes it. Auto layout places on the grid either way.
+function applySnap() {
+  const b = $('#snapBtn');
+  b.classList.toggle('on', state.snap);
+  b.setAttribute('aria-pressed', String(state.snap));
+}
+$('#snapBtn').onclick = () => {
+  state.snap = !state.snap;
+  applySnap();
+  saveState();
+};
+applySnap();
 
 // Data view: sample rows in every box, and an arrow from each foreign key value to its row.
 // The boxes grow, so the tables are spread out; turning it off puts them back where they were.

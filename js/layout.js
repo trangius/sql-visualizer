@@ -18,14 +18,16 @@ function canvasAspect() {
   return r.width && r.height ? Math.min(2.5, Math.max(0.8, r.width / r.height)) : 1.5;
 }
 
-// FK arrows between different tables, with row offsets inside each box
+// FK arrows between different tables, with row offsets inside each box: a foreign key over several columns
+// is one, between its rows and those it points to, as diagramEdges draws it
 function layoutEdges(tables) {
   const out = [];
   for (const t of tables) {
-    shownCols(t).forEach((c, i) => {
-      if (!c.target || c.target === t) return;
-      out.push({ from: t, to: c.target, fy: rowY(i), ty: rowY(shownCols(c.target).indexOf(c.targetCol)) });
-    });
+    for (const c of shownCols(t)) {
+      if (!c.target || c.target === t || !leadsFk(c)) continue;
+      const { fromRows, toRows } = arrowRows(t, c);
+      out.push({ from: t, to: c.target, fy: rowsMiddle(fromRows), ty: rowsMiddle(toRows) });
+    }
   }
   return out;
 }
@@ -72,11 +74,12 @@ function bboxOf(rects) {
 // anchor: where an unconnected table should go (defaults to the middle of what's placed).
 // It looks around each table t is linked to (not over the whole stretch between two that
 // stand far apart), only at spots in line with the columns, and stops after WORK comparisons.
+// With Snap on (state.snap) the spots tried are the grid's points, besides those in line with its links and columns.
 function bestSpot(t, placed, dims, edges, anchor = null) {
-  const { w, h } = dims.get(t);
+  const { w, h } = dims.get(t), place = state.snap ? onGrid : snap, step = state.snap ? GRID : LAYOUT.STEP;
   const mine = edges.filter(e => (e.from === t && placed.has(e.to)) || (e.to === t && placed.has(e.from)));
   const rects = [...placed.values()];
-  if (!rects.length) return { x: snap((anchor?.x ?? 40 + w / 2) - w / 2), y: snap((anchor?.y ?? 40 + h / 2) - h / 2), cost: 0 };
+  if (!rects.length) return { x: place((anchor?.x ?? 40 + w / 2) - w / 2), y: place((anchor?.y ?? 40 + h / 2) - h / 2), cost: 0 };
   const otherSegs = edges
     .filter(e => e.from !== t && e.to !== t && placed.has(e.from) && placed.has(e.to))
     .flatMap(e => estimateRoute(placed.get(e.from), e.fy, placed.get(e.to), e.ty).segs);
@@ -129,11 +132,11 @@ function bestSpot(t, placed, dims, edges, anchor = null) {
       // (a spot outside the area would be judged without the boxes it is close to)
       const x0 = around.x - mx, x1 = around.x + around.w + mx - w, y0 = around.y - my, y1 = around.y + around.h + my - h;
       const xs = new Set(), ys = levelYs.filter(y => y >= y0 && y <= y1);
-      for (let x = snap(x0); x <= x1; x += LAYOUT.STEP) {
+      for (let x = place(x0); x <= x1; x += step) {
         const at = inLine(x);
         if (at !== null && at >= x0 && at <= x1) xs.add(at);
       }
-      for (let y = snap(y0); y <= y1; y += LAYOUT.STEP) ys.push(y);
+      for (let y = place(y0); y <= y1; y += step) ys.push(y);
       for (const x of xs) {
         for (const y of ys) {
           if ((work -= nearRects.length + (3 * mine.length + 1) * (nearRects.length + nearSegs.length) + 1) < 0) break;
@@ -143,7 +146,7 @@ function bestSpot(t, placed, dims, edges, anchor = null) {
       }
     }
   }
-  if (best.cost === Infinity) best = { x: snap(all.x + all.w + LAYOUT.GAP_X * 2), y: snap(all.y), cost: 0 }; // nowhere free nearby: to the right of everything
+  if (best.cost === Infinity) best = { x: place(all.x + all.w + LAYOUT.GAP_X * 2), y: place(all.y), cost: 0 }; // nowhere free nearby: to the right of everything
   return best;
 }
 
@@ -157,9 +160,11 @@ function bestSpot(t, placed, dims, edges, anchor = null) {
 // is done up to three times, for its shape. Otherwise there are no candidate layouts, and no
 // routing in here. Every step is integer arithmetic and every tie falls back to name order,
 // so the same boxes and links give the same diagram on any screen, and in Squill, which runs
-// the same steps (test/fixtures/layout_golden.txt).
+// the same steps (test/fixtures/layout_golden.txt). Each group goes onto the grid (snapLayout)
+// before it goes on its shelf, whether Snap is on or not.
 const AUTO = {
   COL_GAP: 90, ROW_GAP: 50, GROUP_GAP: 120, GRID: 10,
+  SNAP: GRID,                                     // the step every spot lands on (snapLayout): the diagram's grid, a row's height
   LANE_H: 18, LANE_GAP: 10, LANE_SEP: 2,          // a lane (a line passing a column), its gap to a table and to another lane
   LAYER: 2048,                                    // a layer's key is layer · LAYER + strip
   CAP_MIN: 900,                                   // no hub wraps below a screenful
@@ -172,6 +177,7 @@ const AUTO = {
 };
 const tableOrder = (a, b) => byBytes(a.name, b.name);
 const gridUp = v => Math.ceil(v / AUTO.GRID) * AUTO.GRID;
+const snapUp = v => Math.ceil(v / AUTO.SNAP) * AUTO.SNAP;
 // Math.sqrt alone can be one off for a big number; other implementations must get the same
 function isqrt(v) {
   let r = Math.floor(Math.sqrt(v));
@@ -186,35 +192,39 @@ function arrangeAll(tables, dims) {
 }
 
 // Many new tables at once (a pasted block of them) are laid out together and put right of
-// the diagram, instead of each looking for a spot of its own
+// the diagram, instead of each looking for a spot of its own; on the grid, as Auto layout places
 function arrangeBeside(fresh, placed, dims) {
   const bb = bboxOf(placed.map(t => ({ ...pos[t.name], ...dims.get(t) }))), block = layoutTables(fresh, dims);
-  const dx = gridUp(bb.x + bb.w + AUTO.GROUP_GAP), dy = snap(bb.y);
+  const dx = snapUp(bb.x + bb.w + AUTO.GROUP_GAP), dy = onGrid(bb.y);
   for (const [t, r] of block) pos[t.name] = { x: r.x + dx, y: r.y + dy };
 }
 
 // Map table → rect for these tables, by the links among them (Data view draws no arrows:
-// there every table stands alone). Their top-left corner is 0, 0.
+// there every table stands alone), on the grid. Their top-left corner is 0, 0.
 function layoutTables(tables, dims) {
-  tables = [...tables].sort(tableOrder);
-  const index = new Map(tables.map((t, i) => [t, i]));
-  const links = state.dataView ? [] : layoutEdges(tables).filter(e => index.has(e.to))
+  const { order, boxes, links } = layoutInput(tables, dims);
+  const spots = layoutBoxes(boxes, links, Math.round(100 * canvasAspect()));
+  return new Map(order.map((t, i) => [t, { ...spots[i], w: boxes[i].w, h: boxes[i].h }]));
+}
+// What layoutBoxes takes for these tables: the tables in name order, their boxes, the links among them sorted
+function layoutInput(tables, dims) {
+  const order = [...tables].sort(tableOrder), index = new Map(order.map((t, i) => [t, i]));
+  const links = state.dataView ? [] : layoutEdges(order).filter(e => index.has(e.to))
     .map(e => ({ from: index.get(e.from), to: index.get(e.to), fy: e.fy, ty: e.ty }))
     .sort((a, b) => a.from - b.from || a.fy - b.fy || a.to - b.to || a.ty - b.ty);
-  const boxes = tables.map(t => dims.get(t)), spots = layoutBoxes(boxes, links, Math.round(100 * canvasAspect()));
-  return new Map(tables.map((t, i) => [t, { ...spots[i], w: boxes[i].w, h: boxes[i].h }]));
+  return { order, boxes: order.map(t => dims.get(t)), links };
 }
 
-// Keep the diagram where it was on the canvas; a brand new one goes in the middle of the view
+// Keep the diagram where it was on the canvas, to the nearest grid point; a brand new one goes in the middle of the view
 function moveTo(placed, old) {
   const bb = bboxOf([...placed.values()]), mid = viewCenter();
   const origin = old.length ? bboxOf(old.map(p => ({ ...p, w: 0, h: 0 })))
     : mid ? { x: mid.x - bb.w / 2, y: mid.y - bb.h / 2 } : { x: 40, y: 40 };
-  const dx = snap(origin.x - bb.x), dy = snap(origin.y - bb.y);
+  const dx = onGrid(origin.x - bb.x), dy = onGrid(origin.y - bb.y);
   for (const [t, r] of placed) pos[t.name] = { x: r.x + dx, y: r.y + dy };
 }
 
-// Top-left corners for boxes [{ w, h }] in name order, joined by links [{ from, to, fy, ty }]
+// Top-left corners on the AUTO.SNAP grid for boxes [{ w, h }] in name order, joined by links [{ from, to, fy, ty }]
 // (indices, and the two rows' heights inside their boxes) sorted by (from, fy, to, ty).
 // aspectQ: the shape to fill, width / height in hundredths.
 function layoutBoxes(boxes, links, aspectQ) {
@@ -240,7 +250,16 @@ function layoutBoxes(boxes, links, aspectQ) {
       singles.push({ id: g.ids[0], w: b.w, h: b.h });
       area += (b.w + AUTO.COL_GAP) * (b.h + AUTO.ROW_GAP);
     } else {
-      const b = layoutGroup(g.ids.map(t => boxes[t]), g.links, aspectQ);
+      const sizes = g.ids.map(t => boxes[t]), b = layoutGroup(sizes, g.links, aspectQ);
+      // Onto the grid before it goes on its shelf, which then fits it as rounded: rounded among all the tables, a
+      // column could move further down than the tables beside it on the shelf below, and come nearer them
+      b.w = b.h = 0;
+      snapLayout(sizes.map((_, i) => ({ x: b.x[i], y: b.y[i] })), sizes, g.links).forEach((s, i) => {
+        b.x[i] = s.x;
+        b.y[i] = s.y;
+        b.w = Math.max(b.w, s.x + sizes[i].w);
+        b.h = Math.max(b.h, s.y + sizes[i].h);
+      });
       blocks.push({ ...b, ids: g.ids });
       area += (b.w + AUTO.GROUP_GAP) * (b.h + AUTO.GROUP_GAP);
     }
@@ -250,9 +269,9 @@ function layoutBoxes(boxes, links, aspectQ) {
   const spots = new Array(n);
   blocks.sort((a, b) => b.h - a.h || a.ids[0] - b.ids[0]);
   for (const b of blocks) {
-    if (x && x + b.w > width) { x = 0; y += gridUp(tall + AUTO.GROUP_GAP); tall = 0; }
+    if (x && x + b.w > width) { x = 0; y += snapUp(tall + AUTO.GROUP_GAP); tall = 0; }
     b.ids.forEach((t, i) => spots[t] = { x: x + b.x[i], y: y + b.y[i] });
-    x += gridUp(b.w + AUTO.GROUP_GAP);
+    x += snapUp(b.w + AUTO.GROUP_GAP);
     tall = Math.max(tall, b.h);
   }
   // The single tables in rows of as many as fit, each under the one above: columns as wide
@@ -261,14 +280,107 @@ function layoutBoxes(boxes, links, aspectQ) {
   const widest = singles.reduce((m, s) => Math.max(m, s.w), 0), across = Math.max(1, Math.floor((width + AUTO.COL_GAP) / (widest + AUTO.COL_GAP)));
   const wide = new Array(across).fill(0);
   singles.forEach((s, i) => wide[i % across] = Math.max(wide[i % across], s.w));
-  if (blocks.length) y += gridUp(tall + AUTO.GROUP_GAP);
+  if (blocks.length) y += snapUp(tall + AUTO.GROUP_GAP);
   singles.forEach((s, i) => {
-    if (i % across === 0) { y += i ? gridUp(tall + AUTO.ROW_GAP) : 0; x = 0; tall = 0; }
+    if (i % across === 0) { y += i ? snapUp(tall + AUTO.ROW_GAP) : 0; x = 0; tall = 0; }
     spots[s.id] = { x, y };
-    x += gridUp(wide[i % across] + AUTO.COL_GAP);
+    x += snapUp(wide[i % across] + AUTO.COL_GAP);
     tall = Math.max(tall, s.h);
   });
   return spots;
+}
+
+// A group's spots (layoutGroup's) moved onto the AUTO.SNAP grid, keeping the layout. Left edges by one map that
+// keeps their order and rounds each step from one to the next up to the grid: columns stay columns, and no gap
+// between them narrows. Tops each to the nearest grid line, so tables move as little against each other as can be, then
+// further down by whole steps where the layout would change otherwise. Tables move alike in classes: those a
+// straight line joins (it stays straight), two level ones a line joins (it keeps its shape), and any two level
+// ones (rows stay rows). A table moves at least as far as any it stands under (their x overlapping), so no gap
+// in a column narrows; and no line comes nearer a table it passes than AUTO.LANE_GAP, where it was that far or
+// further. Where those hold each other up round, rows may part first, then lines come nearer the tables they
+// pass, and last each table moves for itself. Squill's snap_layout, step by step.
+function snapLayout(spots, boxes, links) {
+  const n = spots.length, G = AUTO.SNAP, out = spots.map(() => ({ x: 0, y: 0 }));
+  if (!n) return out;
+  const byX = spots.map((s, i) => ({ key: s.x, item: i })).sort((a, b) => a.key - b.key);
+  let xNow = 0;
+  byX.forEach((it, i) => { xNow = i ? xNow + snapUp(it.key - byX[i - 1].key) : snapUp(it.key); out[it.item].x = xNow; });
+  // What must hold, as `below` moving at least `least` further than `above` (a table's shift)
+  const stacked = [], passed = [], widest = boxes.reduce((w, b) => Math.max(w, b.w), 0);
+  for (let i = 0; i < n; i++) {
+    const a = byX[i];
+    for (let j = i + 1; j < n; j++) {
+      const b = byX[j];
+      if (b.key >= a.key + boxes[a.item].w) break;
+      stacked.push(spots[a.item].y < spots[b.item].y ? { above: a.item, below: b.item, least: 0 } : { above: b.item, below: a.item, least: 0 });
+    }
+  }
+  // A line passes the tables between its two in x, at the height of either end's row
+  const NEAR = 4 * G; // a line further from a table than this keeps clear of it anyway
+  for (const l of links) {
+    const a = l.from, b = l.to;
+    let lo, hi;
+    if (spots[a].x + boxes[a].w <= spots[b].x) [lo, hi] = [spots[a].x + boxes[a].w, spots[b].x];
+    else if (spots[b].x + boxes[b].w <= spots[a].x) [lo, hi] = [spots[b].x + boxes[b].w, spots[a].x];
+    else continue;
+    let first = 0, past = n;
+    while (first < past) { const mid = (first + past) >> 1; if (byX[mid].key + widest <= lo) first = mid + 1; else past = mid; }
+    for (let k = first; k < n; k++) {
+      const c = byX[k].item;
+      if (spots[c].x >= hi) break;
+      if (spots[c].x + boxes[c].w <= lo || c === a || c === b) continue;
+      for (const [owner, rowAt] of [[a, l.fy], [b, l.ty]]) {
+        const h = spots[owner].y + rowAt, over = spots[c].y - AUTO.LANE_GAP - h, under = h - spots[c].y - boxes[c].h - AUTO.LANE_GAP;
+        if (over >= 0 && over < NEAR) passed.push({ above: owner, below: c, least: -over });
+        if (under >= 0 && under < NEAR) passed.push({ above: c, below: owner, least: -under });
+      }
+    }
+  }
+  // The shifts by class, within the rules; false where the classes keep pushing each other down, round
+  const shift = new Array(n).fill(0);
+  const moved = (rules, cls) => {
+    spots.forEach((s, i) => shift[cls[i]] = Math.floor((s.y + G / 2) / G) * G - s.y);
+    const after = Array.from({ length: n }, () => []);
+    rules.forEach((r, i) => { if (cls[r.above] !== cls[r.below]) after[cls[r.above]].push(i); });
+    const queued = new Uint8Array(n), queue = [];
+    for (let i = 0; i < n; i++) if (cls[i] === i) { queue.push(i); queued[i] = 1; }
+    let raises = 0;
+    for (let at = 0; at < queue.length; at++) {
+      const c = queue[at];
+      queued[c] = 0;
+      for (const i of after[c]) {
+        const d = cls[rules[i].below], need = shift[c] + rules[i].least;
+        if (shift[d] >= need) continue;
+        shift[d] += snapUp(need - shift[d]); // that far, onto its own grid line
+        if (++raises > 4 * (rules.length + n) + 64) return false;
+        if (!queued[d]) { queue.push(d); queued[d] = 1; }
+      }
+    }
+    return true;
+  };
+  const top = (cls, v) => { while (cls[v] !== v) v = cls[v]; return v; };
+  const join = (cls, a, b) => { const ca = top(cls, a), cb = top(cls, b); if (ca !== cb) cls[Math.max(ca, cb)] = Math.min(ca, cb); };
+  const joined = Array.from({ length: n }, (_, i) => i);
+  for (const l of links) {
+    const a = l.from, b = l.to;
+    if (spots[a].y === spots[b].y || (spots[a].y + l.fy === spots[b].y + l.ty && (spots[a].y - spots[b].y) % G === 0)) join(joined, a, b);
+  }
+  const rows = [...joined], byY = spots.map((s, i) => ({ key: s.y, item: i })).sort((a, b) => a.key - b.key);
+  for (let i = 1; i < n; i++) if (byY[i - 1].key === byY[i].key) join(rows, byY[i - 1].item, byY[i].item);
+  const singles = Array.from({ length: n }, (_, i) => i);
+  for (let i = 0; i < n; i++) rows[i] = top(rows, i);
+  for (let i = 0; i < n; i++) joined[i] = top(joined, i);
+  const rules = [...stacked, ...passed];
+  let cls = rows;
+  if (!moved(rules, cls)) {
+    cls = joined;
+    if (!moved(rules, cls) && !moved(stacked, cls)) {
+      cls = singles;
+      if (!moved(rules, cls)) moved(stacked, cls);
+    }
+  }
+  spots.forEach((s, i) => out[i].y = s.y + shift[cls[i]]);
+  return out;
 }
 
 // One group of connected tables: x and y per table from the group's own top-left, and its size

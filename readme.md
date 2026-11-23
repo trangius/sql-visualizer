@@ -7,7 +7,8 @@ A browser tool for drawing SQL table diagrams. Arrows connect foreign-key column
 ![SQL Visualizer](docs/screenshots/light.png)
 
 - Write tables in a simple text format or SQL (MariaDB, MySQL, SQLite, PostgreSQL, SQL Server or Oracle); the diagram updates as you type.
-- Drag tables to arrange them, or use auto layout.
+- Drag tables to arrange them, or use auto layout. Tables snap to the grid so their rows line up (**Snap**; hold Option/Alt to place one freely).
+- Every line takes the colour of the key it points to; a foreign key over several columns is one line that folds out of its rows and splits into the key's.
 - Export diagrams as SVG or PNG, and schemas as SQL for any of those.
 - Keep multiple diagrams in tabs, with light and dark themes.
 

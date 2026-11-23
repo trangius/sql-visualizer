@@ -4,6 +4,14 @@
 
 // Box anatomy (from the design): 40px header, rows of 30px starting 4px below it
 const HEAD_H = 40, ROW_H = 30, ROWS_TOP = 44, PAD_X = 12, BADGE_W = 20, GAP = 8, MIN_W = 190;
+// The dot grid, which tables snap to (state.snap) and Auto layout always places on: a row's height, so the rows
+// of snapped tables line up and an arrow between rows at one height is straight
+const GRID = ROW_H;
+const onGrid = v => Math.round(v / GRID) * GRID;
+// Where a table taken from (x, y) by (dx, dy) stands: on the nearest grid point while `snap`, else on the
+// nearest pixel; where it was while it has not moved
+const dragSpot = (x, y, dx, dy, snap) =>
+  !dx && !dy ? { x, y } : snap ? { x: onGrid(x + dx), y: onGrid(y + dy) } : { x: Math.round(x + dx), y: Math.round(y + dy) };
 const UI_FONT = "'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const MONO_FONT = "'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 const FONTS = {
@@ -188,6 +196,18 @@ function measureTable(t) {
   return { w: Math.ceil(w / 10) * 10, h, rows };
 }
 const rowY = i => ROWS_TOP + i * ROW_H + ROW_H / 2;
+// The height in a box an arrow from or to these rows runs at: a row's centre line, or halfway across a foreign
+// key's rows; on the line between two rows where that is the centre of a row not among them, whose own line it is
+function rowsMiddle(rows) {
+  const lo = Math.min(...rows), hi = Math.max(...rows);
+  return (rowY(lo) + rowY(hi)) / 2 - ((lo + hi) % 2 === 0 && !rows.includes((lo + hi) / 2) ? ROW_H / 2 : 0);
+}
+// The rows of a foreign key an arrow leaves and the rows it points to, in t's and the target's shown rows:
+// a key over several columns (c.fkGroup) is one arrow, made at its lead column, from all of its rows
+function arrowRows(t, c) {
+  const { cols, targetCols } = fkCols(c), from = shownCols(t), to = shownCols(c.target);
+  return { fromRows: cols.map(k => from.indexOf(k)), toRows: targetCols.map(k => to.indexOf(k)) };
+}
 
 // Positions for tables that don't have one yet (see layout.js for how a spot is chosen).
 // The newest auto-placed table "floats": until it is dragged or another table is added,
@@ -271,7 +291,9 @@ const ROUTE = {
 // { a, b, sy, ty, row, fromTable, from, to }: its two boxes, the heights it leaves and ends
 // at, the height of the row it points to (ty moves off it where a notation spreads the
 // ends), its table's name and the two rows' names. Arrows alike in everything else go by
-// table name, then row. held: the boxes being dragged, if any (see searchRoutes).
+// table name, then row. held: the boxes being dragged, if any (see searchRoutes). A foreign
+// key over several columns (fromYs, toYs: see diagramEdges) also gets its trunk, and the
+// lines that fold into it and split from it (edge.trunk, folds, splits; edge.d is the trunk).
 // Returns { searched, waiting, kept }: how many arrows the columns could not serve, how many
 // of those still wait for their search, and what to pass as `before` to the next call. One
 // call searches for as many as its work allows and gives the rest a detour; called again
@@ -1088,28 +1110,68 @@ function addJumps(edges) {
       }
       jumps.push(xs);
     }
-    e.d = pathD(p, jumps);
+    if (!e.fromYs) { e.d = pathD(p, jumps); return; }
+    // A foreign key over several columns: its trunk from where its rows' lines fold into it to where they split
+    const fold = arrowFold(e, false, p), split = arrowFold(e, true, p);
+    e.trunk = [fold.meet, ...p.slice(1, -1), split.meet];
+    e.folds = fold.lines;
+    e.splits = split.lines;
+    e.d = pathD(e.trunk, jumps, 9, true);
   });
 }
 
-// Orthogonal path with rounded corners (radius 9, smaller on short segments),
-// and jumps[i] = x positions where segment i (from point i to i+1) hops over another line
-function pathD(p, jumps = [], r = 9) {
-  const hop = (i, y, dir) => (jumps[i] ?? []).map(x =>
-    `L${x - JUMP_R * dir},${y}A${JUMP_R},${JUMP_R} 0 0 ${dir > 0 ? 1 : 0} ${x + JUMP_R * dir},${y}`).join('');
+// Where a foreign key over several columns meets its trunk at one end (split: the end at the table it points
+// at): that point, and each of its rows' lines as corners in the arrow's direction, from its row at the box's
+// edge to that point, or the other way at the split. p: the route's corners. A line runs straight out past the
+// circle or the arrowhead (the crow's foot), then bends twice, as round as the rows' spacing lets it (9 at
+// most), into the trunk's way, so the lines meet the trunk between the rows from either side, in its
+// direction. All of it within a stub's length of the box, where the router keeps other lines' trunks out, and
+// within the trunk's first stretch (half, where that is its only one), leaving the trunk room to bend; less
+// room makes it smaller (the bends first, in the crow's foot, whose symbols need their room).
+const ARROWHEAD = 9, CROW_REACH = 18;
+function arrowFold(e, split, p = simplify(e.points)) {
+  const n = p.length, end = split ? p[n - 1] : p[0], next = split ? p[n - 2] : p[1], ys = split ? e.toYs : e.fromYs, at = end[1];
+  let near = Infinity; // the nearest row off the trunk's height
+  for (const y of ys) if (y !== at) near = Math.min(near, Math.abs(y - at));
+  const crow = state.notation === 'crowsfoot' && !state.dataView;
+  let r = near < Infinity ? Math.min(9, near / 2) : 0, straight = crow ? CROW_REACH : ARROWHEAD;
+  let room = next[1] === end[1] ? Math.abs(next[0] - end[0]) : 0;
+  room = Math.min(ROUTE.STUB, n === 2 ? room / 2 : Math.max(0, room - 9));
+  if (straight + 2 * r > room) {
+    if (crow) { straight = Math.min(straight, room); r = (room - straight) / 2; }
+    else { const k = room / (straight + 2 * r); straight *= k; r *= k; }
+  }
+  const u = Math.sign(next[0] - end[0]), bend = end[0] + u * (straight + r), meet = [end[0] + u * (straight + 2 * r), at];
+  const lines = ys.map(y => {
+    const corners = y === at ? [[end[0], y], meet] : [[end[0], y], [bend, y], [bend, at], meet];
+    return split ? corners.reverse() : corners;
+  });
+  return { meet, lines };
+}
+
+// Orthogonal path with rounded corners (radius 9, smaller on short segments: two corners share one, each
+// taking at most half, but the first and last whole where wholeEnds, as a line that meets another there),
+// and jumps[i] = x positions where segment i (from point i to i+1) hops over another line, those that lie on it
+function pathD(p, jumps = [], r = 9, wholeEnds = false) {
+  const hop = (i, y, a, b) => {
+    const dir = Math.sign(b - a);
+    return (jumps[i] ?? []).filter(x => x - JUMP_R > Math.min(a, b) && x + JUMP_R < Math.max(a, b)).map(x =>
+      `L${x - JUMP_R * dir},${y}A${JUMP_R},${JUMP_R} 0 0 ${dir > 0 ? 1 : 0} ${x + JUMP_R * dir},${y}`).join('');
+  };
   let d = `M${p[0][0]},${p[0][1]}`;
   for (let i = 1; i < p.length - 1; i++) {
     const [x0, y0] = p[i - 1], [x1, y1] = p[i], [x2, y2] = p[i + 1];
     const d1 = Math.hypot(x1 - x0, y1 - y0), d2 = Math.hypot(x2 - x1, y2 - y1);
+    if (!d1 || !d2) { d += `L${x1},${y1}`; continue; }
     // a jump right next to this corner: round the corner less so they don't overlap
     const near = [...(y0 === y1 ? jumps[i - 1] ?? [] : []), ...(y1 === y2 ? jumps[i] ?? [] : [])]
       .map(x => Math.abs(x - x1) - JUMP_R);
-    const rr = Math.max(0, Math.min(r, d1 / 2, d2 / 2, ...near));
-    if (y0 === y1) d += hop(i - 1, y0, Math.sign(x1 - x0));
+    const rr = Math.max(0, Math.min(r, wholeEnds && i === 1 ? d1 : d1 / 2, wholeEnds && i === p.length - 2 ? d2 : d2 / 2, ...near));
+    if (y0 === y1) d += hop(i - 1, y0, x0, x1);
     d += `L${x1 + (x0 - x1) / d1 * rr},${y1 + (y0 - y1) / d1 * rr}Q${x1},${y1} ${x1 + (x2 - x1) / d2 * rr},${y1 + (y2 - y1) / d2 * rr}`;
   }
   const n = p.length, [lx, ly] = p[n - 1];
-  if (p[n - 2][1] === ly) d += hop(n - 2, ly, Math.sign(lx - p[n - 2][0]));
+  if (p[n - 2][1] === ly) d += hop(n - 2, ly, p[n - 2][0], lx);
   return d + `L${lx},${ly}`;
 }
 
@@ -1214,12 +1276,14 @@ text { dominant-baseline: central; }
 .bundle { stroke: var(--edge, #5e5440); stroke-linecap: round; pointer-events: none; }
 .ahead { fill: var(--edge, #5e5440); }
 .start { fill: var(--canvas, #fff); stroke: var(--edge, #5e5440); stroke-width: 1.5; }
-.edge-g.hl .edge { stroke: var(--accent, #3a4658); stroke-width: 2; }
-.edge-g.hl .ahead { fill: var(--accent, #3a4658); }
-.edge-g.hl .start { stroke: var(--accent, #3a4658); }
 .sym { fill: none; stroke: var(--edge, #5e5440); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .sym-o { fill: var(--canvas, #fff); stroke: var(--edge, #5e5440); stroke-width: 1.4; }
 .mult { font: 500 11px ${MONO_FONT}; fill: var(--muted, #5e5440); dominant-baseline: auto; }
+.edge-g.hued .edge, .edge-g.hued .start, .edge-g.hued .sym, .edge-g.hued .sym-o, .bundle.hued { stroke: oklch(var(--key-l, .55) var(--key-c, .15) var(--h)); }
+.edge-g.hued .ahead { fill: oklch(var(--key-l, .55) var(--key-c, .15) var(--h)); }
+.edge-g.hl .edge { stroke: var(--accent, #3a4658); stroke-width: 2.4; }
+.edge-g.hl .ahead { fill: var(--accent, #3a4658); }
+.edge-g.hl .start { stroke: var(--accent, #3a4658); }
 .edge-g.hl .sym, .edge-g.hl .sym-o { stroke: var(--accent, #3a4658); stroke-width: 2; }
 .edge-g.hl .mult { fill: var(--accent, #3a4658); font-weight: 600; }
 .edge-hit { fill: none; stroke: transparent; stroke-width: 9; }
@@ -1251,13 +1315,15 @@ function computeGeometry() {
 
 // Where several arrows run along the same stretch, that stretch is drawn thicker:
 // 2 arrows twice the width, 3 or more three times (the bus of a table fifty others
-// reference would be a wall). Returns [{ x1, y1, x2, y2, n }].
-// A stretch stops short of the arrowheads and start circles, so they stay visible.
+// reference would be a wall), in their colour: they point to one row. Returns [{ x1, y1, x2, y2, n, hue }].
+// A stretch stops short of the arrowheads and start circles, so they stay visible. A foreign key over several
+// columns is its trunk here.
 function bundles(edges) {
   const lines = new Map(); // "h:y" / "v:x" → [{ a, b, k }] intervals along that line
-  const ends = new Set(edges.flatMap(e => [e.points[0], e.points[e.points.length - 1]].map(p => p.join(','))));
+  const route = e => e.trunk ?? e.points;
+  const ends = new Set(edges.flatMap(e => [route(e)[0], route(e)[route(e).length - 1]].map(p => p.join(','))));
   edges.forEach((e, k) => {
-    const p = simplify(e.points);
+    const p = simplify(route(e));
     for (let i = 1; i < p.length; i++) {
       const [ax, ay] = p[i - 1], [bx, by] = p[i];
       const [key, a, b] = ay === by ? ['h:' + ay, ax, bx] : ['v:' + ax, ay, by];
@@ -1275,38 +1341,46 @@ function bundles(edges) {
       if (!run || run.n < 2) return;
       const pt = v => (horiz ? [v, at] : [at, v]).join(',');
       const a = run.a + (ends.has(pt(run.a)) ? TRIM : 0), b = run.b - (ends.has(pt(run.b)) ? TRIM : 0);
-      if (b > a) out.push(horiz ? { x1: a, y1: at, x2: b, y2: at, n: run.n } : { x1: at, y1: a, x2: at, y2: b, n: run.n });
+      if (b > a) out.push(horiz ? { x1: a, y1: at, x2: b, y2: at, n: run.n, hue: run.hue } : { x1: at, y1: a, x2: at, y2: b, n: run.n, hue: run.hue });
     };
     for (let i = 1; i < cuts.length; i++) {
-      const a = cuts[i - 1], b = cuts[i];
-      const n = Math.min(3, new Set(ivs.filter(v => v.a <= a && v.b >= b).map(v => v.k)).size);
-      if (run && run.n === n && run.b === a) run.b = b;
-      else { flush(); run = { a, b, n }; }
+      const a = cuts[i - 1], b = cuts[i], over = ivs.filter(v => v.a <= a && v.b >= b);
+      const n = Math.min(3, new Set(over.map(v => v.k)).size), hue = over.length ? edges[over[0].k].hue ?? null : null;
+      if (run && run.n === n && run.hue === hue && run.b === a) run.b = b;
+      else { flush(); run = { a, b, n, hue }; }
     }
     flush();
   }
   return out;
 }
 
-// The arrows between boxes (Map table → box), before routing
+// The arrows between boxes (Map table → box), before routing. Each takes the colour of the key it points to
+// (hue, as its FK badge has it). A foreign key over several columns is one arrow, routed as one line (its
+// trunk) from between its rows to between those it points to: fromYs and toYs are its rows' heights, where
+// its lines fold into the trunk and split from it (arrowFold); it is known by its lead column (from) and by
+// the key it points to (to), which arrows to the same key share as a row line.
 function diagramEdges(tables, boxes) {
   const edges = [];
   for (const t of tables) {
-    shownCols(t).forEach((c, i) => {
-      if (!c.target) return;
-      const a = boxes.get(t), b = boxes.get(c.target), row = b.y + rowY(shownCols(c.target).indexOf(c.targetCol));
+    shownCols(t).forEach(c => {
+      if (!c.target || !leadsFk(c)) return;
+      const a = boxes.get(t), b = boxes.get(c.target), g = c.fkGroup, { fromRows, toRows } = arrowRows(t, c), row = b.y + rowsMiddle(toRows);
+      // a key over all or some of g's columns makes it 1-1
+      const keyIn = cols => cols.length > 0 && cols.every(k => g.cols.includes(k));
       edges.push({
         a, b,
         fromTable: t.name, toTable: c.target.name,
         // what the schema guarantees: a unique FK (or one that is the whole PK) makes it 1-1,
         // a nullable FK means a row may have no parent
-        unique: c.unique || solePk(t, c),
-        nullable: c.nullable,
+        unique: g ? keyIn(t.pkCols) || (t.multiUniques ?? []).some(u => keyIn(u.cols)) || g.cols.some(k => k.unique) : c.unique || solePk(t, c),
+        nullable: g ? g.cols.some(k => k.nullable) : c.nullable,
         implicit: c.implicit,
+        hue: c.keyHue,
         from: t.name + '.' + c.name,
-        to: c.target.name + '.' + c.targetCol.name,
-        sy: a.y + rowY(i),
+        to: c.target.name + '.' + (g ? `(${g.targetCols.map(k => k.name).join(', ')})` : c.targetCol.name),
+        sy: a.y + rowsMiddle(fromRows),
         ty: row, row,
+        ...g && { fromYs: fromRows.map(k => a.y + rowY(k)), toYs: toRows.map(k => b.y + rowY(k)) },
       });
     });
   }
@@ -1428,9 +1502,12 @@ function labelTexts(e) {
     ? [e.nullable ? '0..1' : '1', e.unique ? '0..1' : '*']      // referenced end, FK end
     : ['1', e.unique ? '1' : 'N'];
 }
+// A foreign key over several columns has its labels above its top row and below its bottom one, clear of
+// its lines folding and splitting there.
 function placeLabels(edges) {
   const CHAR_W = 6.8, H = 11;
-  const segs = edges.flatMap(e => e.points.slice(1).map((p, i) => [e.points[i], p]));
+  const lines = e => [e.points, ...e.folds ?? [], ...e.splits ?? []];
+  const segs = edges.flatMap(e => lines(e).flatMap(l => l.slice(1).map((p, i) => [l[i], p])));
   const hitsSeg = r => segs.some(([[x1, y1], [x2, y2]]) =>
     Math.max(x1, x2) >= r.x && Math.min(x1, x2) <= r.x + r.w && Math.max(y1, y2) >= r.y && Math.min(y1, y2) <= r.y + r.h);
   const taken = [];
@@ -1438,10 +1515,10 @@ function placeLabels(edges) {
   for (const e of edges) {
     const pts = e.points, n = pts.length;
     const [target, fk] = labelTexts(e);
-    e.labels = [[pts[n - 1], pts[n - 2], target], [pts[0], pts[1], fk]].map(([[x, y], [nx], text]) => {
+    e.labels = [[pts[n - 1], pts[n - 2], target, e.toYs], [pts[0], pts[1], fk, e.fromYs]].map(([[x, y], [nx], text, ys = [y]]) => {
       const d = Math.sign(nx - x) || 1, w = text.length * CHAR_W;
       const spot = (dx, above) => {
-        const lx = x + dx * d, ly = above ? y - 8 : y + 15;
+        const lx = x + dx * d, ly = above ? Math.min(...ys) - 8 : Math.max(...ys) + 15;
         return { x: lx, y: ly, anchor: d > 0 ? 'start' : 'end', text, box: { x: d > 0 ? lx : lx - w, y: ly - H + 2, w, h: H } };
       };
       const tries = [spot(9, true), spot(9, false), spot(24, true), spot(24, false)];
@@ -1452,38 +1529,43 @@ function placeLabels(edges) {
   }
 }
 
+// The marks at an arrow's ends; a foreign key's over several columns at each of its rows' lines
 function endMarks(e) {
   const pts = e.points, n = pts.length;
-  const [sx, sy] = pts[0], [tx, ty] = pts[n - 1];
-  const sd = Math.sign(pts[1][0] - sx) || 1, td = Math.sign(pts[n - 2][0] - tx) || -1;
+  // [x, y, d]: where a line meets its box, and d the direction away from the box
+  const end = ([x, y], [nx], d) => [x, y, Math.sign(nx - x) || d];
+  const starts = e.folds ? e.folds.map(l => end(l[0], l[1], 1)) : [end(pts[0], pts[1], 1)];
+  const ends = e.splits ? e.splits.map(l => end(l[l.length - 1], l[l.length - 2], -1)) : [end(pts[n - 1], pts[n - 2], -1)];
   const labels = () => e.labels.map(l =>
     `<text class="mult" x="${l.x}" y="${l.y}" text-anchor="${l.anchor}">${l.text}</text>`).join('');
   switch (state.dataView ? 'arrows' : state.notation) {
     case 'crowsfoot': {
       const th = e.small ? 3.5 : 6;
       // referenced end: exactly one, or zero-or-one when the FK may be NULL
-      let s = `<path class="sym" d="${e.nullable ? crowZeroOne(tx, ty, td, th) : crowOne(tx, ty, td, th)}"/>`;
-      if (e.nullable) s += ring(tx, ty, td, th);
+      let s = ends.map(([tx, ty, td]) => `<path class="sym" d="${e.nullable ? crowZeroOne(tx, ty, td, th) : crowOne(tx, ty, td, th)}"/>` +
+        (e.nullable ? ring(tx, ty, td, th) : '')).join('');
       // FK end: zero-or-many, or zero-or-one when the FK is unique (1-1)
-      s += `<path class="sym" d="${e.unique ? crowZeroOne(sx, sy, sd, 6) : crowMany(sx, sy, sd, 6)}"/>` + ring(sx, sy, sd, 6);
+      s += starts.map(([sx, sy, sd]) => `<path class="sym" d="${e.unique ? crowZeroOne(sx, sy, sd, 6) : crowMany(sx, sy, sd, 6)}"/>` + ring(sx, sy, sd, 6)).join('');
       return s;
     }
     case 'uml':
       return labels();
     case 'ratio':
       return labels();
-    default: { // arrows: a hollow circle at the FK row, an arrowhead at the referenced row
-      return `<path class="ahead" d="M${tx},${ty}L${tx + 9 * td},${ty - 4.5}L${tx + 9 * td},${ty + 4.5}Z"/>` +
-        `<circle class="start" cx="${sx}" cy="${sy}" r="3"/>`;
-    }
+    default: // arrows: a hollow circle at the FK row, an arrowhead at the referenced row
+      return ends.map(([tx, ty, td]) => `<path class="ahead" d="M${tx},${ty}L${tx + ARROWHEAD * td},${ty - ARROWHEAD / 2}L${tx + ARROWHEAD * td},${ty + ARROWHEAD / 2}Z"/>`).join('') +
+        starts.map(([sx, sy]) => `<circle class="start" cx="${sx}" cy="${sy}" r="3"/>`).join('');
   }
 }
 
+// An arrow in the colour of the key it points to; a foreign key's over several columns with its rows' lines,
+// which are part of it under the mouse too
 function edgeMarkup(e, interactive) {
-  let s = `<g class="edge-g" data-from="${esc(e.from)}" data-to="${esc(e.to)}" data-ft="${esc(e.fromTable)}" data-tt="${esc(e.toTable)}">`;
-  if (interactive) s += `<path class="edge-hit" d="${e.d}"/>`;
-  s += `<path class="edge${e.implicit ? ' implicit' : ''}" d="${e.d}"/>` + endMarks(e) + '</g>';
-  return s;
+  const hued = e.hue != null, rows = [...e.folds ?? [], ...e.splits ?? []].map(l => pathD(l, [], 9, true));
+  let s = `<g class="edge-g${hued ? ' hued' : ''}"${hued ? ` style="--h:${e.hue}"` : ''} data-from="${esc(e.from)}" data-to="${esc(e.to)}" data-ft="${esc(e.fromTable)}" data-tt="${esc(e.toTable)}">`;
+  if (interactive) for (const d of [e.d, ...rows]) s += `<path class="edge-hit" d="${d}"/>`;
+  for (const d of [e.d, ...rows]) s += `<path class="edge${e.implicit ? ' implicit' : ''}" d="${d}"/>`;
+  return s + endMarks(e) + '</g>';
 }
 
 function diagramMarkup(interactive) {
@@ -1491,7 +1573,7 @@ function diagramMarkup(interactive) {
   for (const [t, b] of geometry.boxes) s += boxMarkup(t, b, interactive);
   for (const e of geometry.edges) s += edgeMarkup(e, interactive);
   for (const l of geometry.bundles ?? []) {
-    s += `<line class="bundle" x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}" stroke-width="${1.4 * l.n}"/>`;
+    s += `<line class="bundle${l.hue != null ? ' hued' : ''}"${l.hue != null ? ` style="--h:${l.hue}"` : ''} x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}" stroke-width="${1.4 * l.n}"/>`;
   }
   return s;
 }
@@ -1543,8 +1625,9 @@ const CARD_TOP = 64, CARD_BOTTOM = 56; // room kept for the floating toolbars
 
 function applyView() {
   vp.setAttribute('transform', `translate(${view.tx},${view.ty}) scale(${view.s})`);
-  svg.style.backgroundSize = `${20 * view.s}px ${20 * view.s}px`;
-  svg.style.backgroundPosition = `${view.tx}px ${view.ty}px`;
+  // a dot on every grid point: the tile's dot is in its middle
+  svg.style.backgroundSize = `${GRID * view.s}px ${GRID * view.s}px`;
+  svg.style.backgroundPosition = `${view.tx - GRID / 2 * view.s}px ${view.ty - GRID / 2 * view.s}px`;
   $('#zoomLabel').textContent = Math.round(view.s * 100) + '%';
   saveState(); // each diagram remembers its pan/zoom (the save is debounced)
 }
@@ -1671,7 +1754,7 @@ svg.addEventListener('pointerdown', e => {
     if (!selected.has(name)) setSelected([]);
     const names = selected.has(name) ? [...selected].filter(n => pos[n]) : [name];
     drag = { kind: 'box', name, w, start: Object.fromEntries(names.map(n => [n, { ...pos[n] }])),
-             sx: e.clientX, sy: e.clientY, moved: false, line: e.target.closest('[data-line]')?.dataset.line ?? null };
+             sx: e.clientX, sy: e.clientY, moved: false, free: e.altKey, line: e.target.closest('[data-line]')?.dataset.line ?? null };
   } else if (multi && !look) {
     const m = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     m.setAttribute('class', 'marquee');
@@ -1714,9 +1797,11 @@ svg.addEventListener('pointermove', e => {
   if (!drag.moved && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 4) return;
   if (!drag.moved) { histBegin('move'); svg.classList.add('dragging'); }
   drag.moved = true;
+  // With Snap on, the tables stand on the grid; Option (Alt) held at any time during the drag lets them go
+  // where the mouse takes them, to the end of it
+  if (e.altKey) drag.free = true;
   const w = toWorld(e);
-  const dx = Math.round((w.x - drag.w.x) / 10) * 10, dy = Math.round((w.y - drag.w.y) / 10) * 10;
-  for (const [n, p] of Object.entries(drag.start)) pos[n] = { x: p.x + dx, y: p.y + dy };
+  for (const [n, p] of Object.entries(drag.start)) pos[n] = dragSpot(p.x, p.y, w.x - drag.w.x, w.y - drag.w.y, state.snap && !drag.free);
   if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawDiagram(); });
 });
 function endDrag(e) {

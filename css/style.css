@@ -206,6 +206,7 @@ body.panel-collapsed #left, body.panel-collapsed #split { display: none; }
 /* narrow screens: drop the toolbar labels (the buttons keep their tooltips) */
 @media (max-width: 760px) { .appbar .tool .lbl { display: none; } .appbar .tool { padding: 0 8px; } }
 @media (max-width: 440px) { .appbar { gap: 4px; padding: 0 8px 0 10px; } .appbar .tool { padding: 0 6px; } } /* a phone: every button fits */
+@media (max-width: 440px) { #snapBtn { display: none; } } /* …once Snap goes: it stays as set (on unless turned off), for a finger's drag too */
 
 .menu-wrap { position: relative; }
 .menu {

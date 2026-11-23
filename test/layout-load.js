@@ -8,9 +8,10 @@ module.exports = function load() {
   const read = name => fs.readFileSync(path.join(__dirname, '..', 'js', name + '.js'), 'utf8');
   const diagram = read('diagram');
   const geometry = diagram.slice(0, diagram.indexOf('// ─── Diagram rendering'));
-  const edges = diagram.slice(diagram.indexOf('function diagramEdges('), diagram.indexOf('function dataBoxBody('));
+  const edges = diagram.slice(diagram.indexOf('function bundles('), diagram.indexOf('function dataBoxBody('));
+  const marks = diagram.slice(diagram.indexOf('const crowOne'), diagram.indexOf('function diagramMarkup('));
   return new Function(`
-    const state = { dataView: false, keysOnly: false, indexes: true, notation: 'arrows' };
+    const state = { dataView: false, keysOnly: false, indexes: true, notation: 'arrows', snap: false };
     const canvas = { width: 1500, height: 1000 }, view = { tx: 0, ty: 0, s: 1 };
     const svg = { getBoundingClientRect: () => canvas };
     const document = { querySelector: () => null, createElement: () => ({ getContext: () => ({
@@ -23,8 +24,10 @@ module.exports = function load() {
     ${read('examples')}
     ${geometry}
     ${edges}
+    ${marks}
     ${read('layout')}
     return { state, canvas, pos, parseText, resolve, markShown, shownCols, measureTable, footLines, ensurePositions,
-      arrangeAll, diagramEdges, routeEdges, simplify, EXAMPLES, AUTO, ROUTE };
+      arrangeAll, diagramEdges, routeEdges, simplify, bundles, arrowFold, placeLabels, edgeMarkup, layoutInput, layoutBoxes, layoutGroup, snapLayout,
+      dragSpot, rowY, EXAMPLES, AUTO, ROUTE, GRID };
   `)();
 };

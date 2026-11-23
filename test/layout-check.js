@@ -165,11 +165,38 @@ function spotsHash(r) {
   return h.toString(16).padStart(8, '0');
 }
 
-// What holds after Auto layout, of any schema: a valid diagram, drawn without the search, the
-// same whatever order the tables are declared in, unchanged by a second Auto layout
+// Each table's group of linked tables, by the first table in it; ends: each link's two tables
+function linkedGroups(n, ends) {
+  const group = Array.from({ length: n }, (_, i) => i), top = v => { while (group[v] !== v) v = group[v]; return v; };
+  for (const [p, q] of ends) { const a = top(p), b = top(q); group[Math.max(a, b)] = Math.min(a, b); }
+  for (let i = 0; i < n; i++) group[i] = top(i);
+  return group;
+}
+// How near a table comes to the box around a group of linked tables it is not in: the router routes them together
+// when that is less than ROUTE.NEAR
+function groupsApart({ boxes, edges }) {
+  const all = [...boxes.values()], index = new Map(all.map((b, i) => [b, i]));
+  const group = linkedGroups(all.length, edges.map(e => [index.get(e.a), index.get(e.b)])), count = new Array(all.length).fill(0);
+  for (const g of group) count[g]++;
+  let least = Infinity;
+  for (let g = 0; g < all.length; g++) {
+    if (count[g] < 2) continue;
+    const mine = all.filter((_, i) => group[i] === g);
+    const x0 = Math.min(...mine.map(b => b.x)), y0 = Math.min(...mine.map(b => b.y)), x1 = Math.max(...mine.map(b => b.x + b.w)), y1 = Math.max(...mine.map(b => b.y + b.h));
+    all.forEach((b, i) => { if (group[i] !== g) least = Math.min(least, Math.max(b.x - x1, x0 - (b.x + b.w), b.y - y1, y0 - (b.y + b.h))); });
+  }
+  return least;
+}
+
+// What holds after Auto layout, of any schema: a valid diagram on the grid, drawn without the search, its groups of
+// linked tables at least AUTO.GROUP_GAP from every table outside them, the same whatever order the tables are
+// declared in, unchanged by a second Auto layout
 function sound(text, options, name) {
   const r = run(text, options), m = validate(r, name);
+  for (const b of r.boxes.values()) assert(b.x % api.AUTO.SNAP === 0 && b.y % api.AUTO.SNAP === 0, `${name}: a table off the grid after Auto layout`);
   assert.equal(r.searched, 0, `${name}: an arrow needed the search`);
+  const apart = groupsApart(r);
+  assert(apart >= api.AUTO.GROUP_GAP, `${name}: a table ${apart} from a group of tables it is not in`);
   const again = draw(r.nodes, new Map([...r.boxes].map(([t, b]) => [t, { w: b.w, h: b.h }])));
   assert.deepEqual(spots(again), spots(r), `${name}: a second Auto layout moves tables`);
   assert.deepEqual(spots(run(backwards(text), options)), spots(r), `${name}: the order the tables are declared in changes the layout`);
@@ -243,6 +270,141 @@ for (const notation of ['arrows', 'uml', 'ratio', 'crowsfoot']) {
   assert.equal(api.footLines(visit).filter(f => f.index).length, 0, 'an index line with the toggle off');
   api.state.indexes = true;
 }
+// A foreign key over several columns is one arrow, routed as one line (its trunk) from between its rows to between
+// those they point to; at either end its rows' lines fold into it and split from it, each pair the other's mirror
+// image about the trunk, all within a stub of the box; the layout links it once, there
+const PAIRED = 'Line\n  OrderNo int\n  LineNo int\n  pk (OrderNo, LineNo)\n\nNote\n  Id\n  OrderNo -> Line.OrderNo\n  LineNo -> Line.LineNo\n';
+const same = (p, q) => p[0] === q[0] && p[1] === q[1];
+// The tables at these spots, 190 wide, routed
+function placed(text, at, notation = 'arrows') {
+  api.state.notation = notation;
+  const nodes = model(text), boxes = new Map(nodes.map(t => [t, { ...at[t.name], w: BOX_W, h: boxH(t) }])), edges = api.diagramEdges(nodes, boxes);
+  const routed = api.routeEdges(edges, [...boxes.values()]);
+  api.state.notation = 'arrows';
+  return { nodes, boxes, edges, ...routed };
+}
+{
+  for (const notation of ['arrows', 'crowsfoot', 'uml']) sound(PAIRED, { notation, measured: true }, `fk over a key as ${notation}`);
+  const nodes = model(PAIRED), { links } = api.layoutInput(nodes, new Map(nodes.map(t => [t, { w: BOX_W, h: boxH(t) }])));
+  assert.deepEqual(links.map(l => [l.fy, l.ty]), [[104, 74]], 'fk over a key: not one link between its rows');
+  const r = placed(PAIRED, { Note: { x: 0, y: 0 }, Line: { x: 400, y: 0 } }), e = r.edges[0], p = api.simplify(e.points), n = p.length;
+  assert(r.edges.length === 1 && e.sy === 104 && e.ty === 74 && e.to === 'Line.(OrderNo, LineNo)', 'fk over a key: not one arrow between its rows');
+  assert(same(p[0], [BOX_W, 104]) && same(p[n - 1], [400, 74]) && r.searched === 0, `fk over a key: the trunk runs ${JSON.stringify(p)}`);
+  const fold = e.trunk[0], split = e.trunk[e.trunk.length - 1];
+  assert(fold[1] === 104 && fold[0] > BOX_W && fold[0] <= BOX_W + api.ROUTE.STUB && fold[0] < p[1][0], `fk over a key: it folds at ${fold}`);
+  assert(split[1] === 74 && split[0] < 400 && split[0] >= 400 - api.ROUTE.STUB && split[0] > p[n - 2][0], `fk over a key: it splits at ${split}`);
+  assert(e.folds.length === 2 && e.splits.length === 2, 'fk over a key: not a line per row');
+  e.folds.forEach((l, i) => assert(same(l[0], [BOX_W, 89 + 30 * i]) && same(l[l.length - 1], fold), `fk over a key: row ${i} folds in by ${JSON.stringify(l)}`));
+  e.splits.forEach((l, i) => assert(same(l[0], split) && same(l[l.length - 1], [400, 59 + 30 * i]), `fk over a key: row ${i} splits off by ${JSON.stringify(l)}`));
+  const [f0, f1] = e.folds, [s0, s1] = e.splits;
+  assert(f0.length === 4 && f0[1][0] === f1[1][0] && 104 - f0[1][1] === f1[1][1] - 104 && s0[2][0] === s1[2][0] && 74 - s0[2][1] === s1[2][1] - 74,
+    `fk over a key: not mirrored: ${JSON.stringify([e.folds, e.splits])}`);
+  // drawn from where it folds to where it splits, with a circle at each of its rows and an arrowhead at each of the key's
+  const svg = api.edgeMarkup(e, true), count = cls => svg.split(`class="${cls}"`).length - 1;
+  assert(e.d.startsWith(`M${fold[0]},${fold[1]}`) && e.d.endsWith(`L${split[0]},${split[1]}`), `fk over a key: the trunk is drawn as ${e.d}`);
+  assert.deepEqual(['edge', 'edge-hit', 'ahead', 'start'].map(count), [5, 5, 2, 2], 'fk over a key: not a line, a circle and an arrowhead per row');
+  // in the crow's foot, the lines run straight past the symbols before they bend, and each row has its symbols
+  const crow = placed(PAIRED, { Note: { x: 0, y: 0 }, Line: { x: 400, y: 0 } }, 'crowsfoot').edges[0];
+  api.state.notation = 'crowsfoot';
+  const crowSvg = api.edgeMarkup(crow, false);
+  api.state.notation = 'arrows';
+  assert(crow.folds.every(l => l.length === 2 || l[1][0] - BOX_W >= 18) && crow.splits.every(l => l.length === 2 || 400 - l[l.length - 3][0] >= 18), "fk over a key: the crow's foot runs into its bends");
+  assert.equal(crowSvg.split('class="sym"').length - 1, 4, "fk over a key: not a crow's foot per row");
+  // its labels above its top row and below its bottom one, clear of its lines
+  api.state.notation = 'uml';
+  const uml = placed(PAIRED, { Note: { x: 0, y: 0 }, Line: { x: 400, y: 0 } }, 'uml');
+  api.state.notation = 'uml';
+  api.placeLabels(uml.edges);
+  api.state.notation = 'arrows';
+  uml.edges[0].labels.forEach((l, i) => { const [top, bottom] = i ? [89, 119] : [59, 89]; assert(l.y < top || l.y > bottom, `fk over a key: a label among its rows' lines at ${l.y}`); });
+  // two foreign keys to one key share its row line: their lines split into its rows alike
+  const two = placed('City\n  Name\n  Country\n  pk (Name, Country)\nRoute\n  Id\n  FromName -> City.Name\n  ToName -> City.Name\n' +
+    '  FromCountry -> City.Country\n  ToCountry -> City.Country\n', { Route: { x: 0, y: 0 }, City: { x: 400, y: 0 } });
+  assert(two.edges.length === 2 && two.edges[0].to === two.edges[1].to && JSON.stringify(two.edges[0].splits) === JSON.stringify(two.edges[1].splits),
+    'two fks to one key: not one row line');
+}
+// Every arrow takes the colour of the key it points to, as its FK badge has it: one to a primary key that key's, one to
+// a unique column that column's, one over several columns that key's (its fk (A, B) -> T line's too); the stretches
+// lines share are in theirs, and they point to one row
+{
+  const nodes = model('T\n  Id\n  Code int unique\n\nU\n  Id\n  TId -> T\n  TCode -> T.Code\n'), [t, u] = nodes;
+  const boxes = new Map(nodes.map(o => [o, { x: o === t ? 400 : 0, y: 0, w: BOX_W, h: boxH(o) }])), edges = api.diagramEdges(nodes, boxes);
+  api.routeEdges(edges, [...boxes.values()]);
+  const [toId, toCode] = ['TId', 'TCode'].map(n => edges.find(e => e.from === 'U.' + n));
+  assert(t.hue != null && toId.hue === t.hue && toCode.hue != null && toCode.hue !== t.hue, 'key colours: an arrow not in the colour of the key it points to');
+  for (const e of [toId, toCode]) assert.equal(e.hue, u.cols.find(c => 'U.' + c.name === e.from).keyHue, 'key colours: an arrow not in its FK badge\'s colour');
+  assert(api.edgeMarkup(toCode, false).startsWith(`<g class="edge-g hued" style="--h:${toCode.hue}"`), 'key colours: an arrow drawn without its colour');
+  const paired = model(PAIRED), line = paired.find(o => o.name === 'Line'), note = paired.find(o => o.name === 'Note');
+  const e = api.diagramEdges(paired, new Map(paired.map(o => [o, { x: o === line ? 400 : 0, y: 0, w: BOX_W, h: boxH(o) }])))[0];
+  assert(line.hue != null && e.hue === line.hue && api.footLines(note).find(f => f.label === 'fk').hue === line.hue, 'key colours: an fk over a key not in the key\'s colour');
+  for (const name of ['rental', 'shop', 'store']) {
+    const r = run(corpus.find(s => s.name === name).text), shared = api.bundles(r.edges);
+    assert(shared.length > 0, `${name}: no lines share a stretch`);
+    for (const b of shared) {
+      // the lines that run along any of it
+      const level = b.y1 === b.y2, on = r.edges.filter(e => api.simplify(e.points).some((q, i, p) => i && (level
+        ? q[1] === b.y1 && p[i - 1][1] === b.y1 && Math.min(q[0], p[i - 1][0]) < b.x2 && Math.max(q[0], p[i - 1][0]) > b.x1
+        : q[0] === b.x1 && p[i - 1][0] === b.x1 && Math.min(q[1], p[i - 1][1]) < b.y2 && Math.max(q[1], p[i - 1][1]) > b.y1)));
+      assert(on.length > 1 && on.every(e => e.hue === b.hue && e.to === on[0].to), `${name}: a shared stretch not in its lines' colour`);
+    }
+  }
+}
+// Snap: a dragged table stands on the grid, which is a row's height, so two snapped tables' rows line up and an arrow
+// between rows at one height is straight; freed (Option), it goes where the mouse takes it
+{
+  assert.equal(api.GRID, 30);
+  assert.deepEqual(api.dragSpot(13, 47, 100, 50, true), { x: 120, y: 90 }, 'a drag does not snap to the grid');
+  assert.deepEqual(api.dragSpot(13, 47, 100, 50, false), { x: 113, y: 97 }, 'a free drag does not go where the mouse takes it');
+  assert.deepEqual(api.dragSpot(13, 47, 0, 0, true), { x: 13, y: 47 }, 'a table pressed but not moved leaves its spot');
+  const straight = snap => {
+    const r = placed('A\n  Id\n  Name vc\n  BId -> B\n\nB\n  Id\n', { A: api.dragSpot(0, 0, 12, 17, snap), B: api.dragSpot(400, 0, 5, 80, snap) });
+    return r.edges.length === 1 && api.simplify(r.edges[0].points).length === 2;
+  };
+  assert(straight(true), 'two snapped tables\' rows do not line up');
+  assert(!straight(false), 'dragged freely a few px off, the arrow is straight');
+  // With Snap on, a new table beside a laid-out diagram lands on the grid too
+  const rental = corpus[0].text;
+  run(rental);
+  api.state.snap = true;
+  const one = model(rental + '\nNote\n  Id\n  ReceiptId -> Receipt');
+  api.ensurePositions(one, new Map(one.map(o => [o, { w: BOX_W, h: boxH(o) }])));
+  api.state.snap = false;
+  assert(api.pos.Note && api.pos.Note.x % api.GRID === 0 && api.pos.Note.y % api.GRID === 0, `a new table with Snap on is off the grid at ${JSON.stringify(api.pos.Note)}`);
+}
+// Auto layout's spots on the grid (snapLayout), every one on it; each group of linked tables there checked against
+// the group as layoutGroup lays it out: left edges in the same order, the same ones equal (columns); of two tables
+// over each other the same one on top, and no gap narrower, either way; the lines that were straight still straight
+function snappedAsLaidOut(text, name) {
+  const nodes = model(text), { boxes, links } = api.layoutInput(nodes, new Map(nodes.map(t => [t, { w: BOX_W, h: boxH(t) }])));
+  const snapped = api.layoutBoxes(boxes, links, 150), G = api.AUTO.SNAP, n = boxes.length;
+  for (const s of snapped) assert(s.x % G === 0 && s.y % G === 0, `${name}: a table off the grid`);
+  // the groups as layoutBoxes takes them apart: their tables in order, numbered in the group, and their links in order
+  const group = linkedGroups(n, links.map(l => [l.from, l.to])), local = new Array(n);
+  const apart = (a, b, wa, wb) => a <= b ? b - a - wa : a - b - wb;
+  for (let g = 0; g < n; g++) {
+    if (group[g] !== g) continue;
+    const ids = [];
+    for (let i = 0; i < n; i++) if (group[i] === g) { local[i] = ids.length; ids.push(i); }
+    if (ids.length === 1) continue;
+    const sizes = ids.map(i => boxes[i]), groupLinks = links.filter(l => group[l.from] === g).map(l => ({ from: local[l.from], to: local[l.to], fy: l.fy, ty: l.ty }));
+    const placed = api.layoutGroup(sizes, groupLinks, 150);
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const [a, b, p, q] = [{ x: placed.x[i], y: placed.y[i] }, { x: placed.x[j], y: placed.y[j] }, snapped[ids[i]], snapped[ids[j]]];
+        assert.equal(Math.sign(b.x - a.x), Math.sign(q.x - p.x), `${name}: two tables no longer in the same order or column`);
+        const gapX = apart(a.x, b.x, sizes[i].w, sizes[j].w), gapY = apart(a.y, b.y, sizes[i].h, sizes[j].h);
+        if (gapX < 0) assert(Math.sign(b.y - a.y) === Math.sign(q.y - p.y) && apart(p.y, q.y, sizes[i].h, sizes[j].h) >= gapY, `${name}: two tables over each other, closer or turned round`);
+        else assert(apart(p.x, q.x, sizes[i].w, sizes[j].w) >= gapX, `${name}: two tables side by side, closer`);
+      }
+    }
+    for (const l of groupLinks) {
+      if (placed.y[l.from] + l.fy === placed.y[l.to] + l.ty) assert.equal(snapped[ids[l.from]].y + l.fy, snapped[ids[l.to]].y + l.ty, `${name}: a straight line jogs`);
+    }
+  }
+}
+for (const { name, text } of corpus) snappedAsLaidOut(text, name);
+for (let seed = 1; seed <= FUZZ / 4; seed++) snappedAsLaidOut(scrambled(seed), `random schema ${seed}`);
+
 // Random schemas, as the boxes of the tests and as the page measures them
 for (let seed = 1; seed <= FUZZ; seed++) {
   for (const options of [{}, { measured: true }, { measured: true, notation: 'crowsfoot' }, { measured: true, keysOnly: true, aspect: 0.8 }, { aspect: 2.25, notation: 'uml' }]) {

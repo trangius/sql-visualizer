@@ -58,6 +58,10 @@
     <svg width="14" height="14" class="ico thin" aria-hidden="true"><path d="M2 3h6M2 7h10M2 11h6"/><path d="M10.5 9.5 12.5 11.5 10.5 13.5" /><path d="M10.5 1.5 12.5 3.5 10.5 5.5"/></svg>
     <span class="lbl">Indexes</span>
   </button>
+  <button id="snapBtn" class="tool" aria-pressed="true" title="Snap to grid: a dragged or new table stands on the grid, so rows line up and lines run straight. Hold ⌥ Option (Alt) while dragging to place a table freely">
+    <svg width="14" height="14" class="ico thin" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><g fill="currentColor" stroke="none"><circle cx="1.5" cy="1.5" r=".9"/><circle cx="7" cy="1.5" r=".9"/><circle cx="12.5" cy="1.5" r=".9"/><circle cx="1.5" cy="7" r=".9"/><circle cx="12.5" cy="7" r=".9"/><circle cx="1.5" cy="12.5" r=".9"/><circle cx="7" cy="12.5" r=".9"/><circle cx="12.5" cy="12.5" r=".9"/></g></svg>
+    <span class="lbl">Snap</span>
+  </button>
   <div class="menu-wrap">
     <button id="notationBtn" class="tool" title="Relationship notation" aria-haspopup="menu" aria-expanded="false"><span id="notationIco"></span><span class="lbl">Notation</span></button>
     <div id="notationMenu" class="menu" role="menu" hidden>
@@ -237,6 +241,7 @@
           <span>⇧/⌘ + click a table</span><span>Add it to the selection</span>
           <span>⇧ + drag canvas</span><span>Select tables in a box</span>
           <span>Drag a selected table</span><span>Move all selected</span>
+          <span>⌥ + drag a table</span><span>Move it freely, off the grid (Snap, top bar)</span>
           <span>↵ / ⌫ / ⌘D</span><span>Edit / delete / duplicate the selected tables</span>
           <span>Right-click a table</span><span>Edit it, add a column, duplicate or delete it</span>
           <span>Right-click the canvas</span><span>New table, select all, layout, zoom, copy image</span>
