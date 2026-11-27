@@ -596,6 +596,16 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   width: 840px; max-width: 100%; max-height: calc(100vh - 32px); overflow: auto;
 }
 .dlg h2 { font-size: 14.5px; font-weight: 600; margin: 0 0 14px; letter-spacing: -.01em; }
+/* the table dialog keeps one height whatever it holds: only its panes scroll, so a line coming or going never moves
+   Save and Cancel; they and the hints above them are ruled off, the rows scrolling under the edge */
+#tableDlg .dlg { display: flex; flex-direction: column; height: min(600px, calc(100vh - 32px)); overflow: hidden; }
+#tableDlg .dlg > * { flex: none; }
+#tableDlg .dlg > [role=tabpanel] { flex: 1 1 0; min-height: 0; overflow-y: auto; margin: 0 -20px; padding: 0 20px; }
+#tableDlg .dlg-actions { margin: 0 -20px; padding: 14px 20px 0; border-top: 1px solid var(--line); }
+.dlg-hints {
+  display: flex; flex-direction: column; gap: 4px; margin: 0 -20px; padding: 10px 20px 12px; border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 12.5px; line-height: 1.45;
+}
 .dlg input[type=text], .dlg input:not([type]) {
   font: 13px var(--mono); height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px;
   background: var(--box-bg); color: var(--fg); width: 100%; min-width: 0;
@@ -610,7 +620,10 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   display: grid; gap: 6px; align-items: center;
   grid-template-columns: 16px minmax(110px, 1.2fr) minmax(90px, .8fr) 224px minmax(150px, 1.6fr) 28px;
 }
-.col-head { font-size: 11px; color: var(--muted); padding: 0 0 4px; text-transform: uppercase; letter-spacing: .06em; }
+.col-head {
+  position: sticky; top: 0; z-index: 1; background: var(--panel);
+  font-size: 11px; color: var(--muted); padding: 0 0 4px; text-transform: uppercase; letter-spacing: .06em;
+}
 .col-row { padding: 3px 0; }
 /* drag a row by its grip to move it */
 .grip { display: grid; place-items: center; height: 28px; color: var(--faint); cursor: grab; user-select: none; touch-action: none; }
@@ -659,9 +672,7 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .icon-btn.link { width: 30px; height: 28px; border: 1px solid transparent; border-radius: 7px; color: var(--faint); }
 .icon-btn.link svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .col-row.fk-open .fk-chip, .col-row.fk-open .icon-btn.link { border-color: var(--accent); color: var(--accent); }
-#tdAdd, #tdAddCombined { margin: 8px 0 20px; }
-/* under + Add column: the primary key is over several columns, on the Combined tab */
-.key-hint { margin: -12px 0 18px; color: var(--muted); font-size: 12.5px; }
+#tdAdd, #tdAddCombined { margin: 8px 0 14px; scroll-margin-bottom: 14px; } /* scrolled into view with the room under it */
 /* Columns / Combined: the one shown underlined */
 .dlg-tabs { display: flex; gap: 4px; margin: -4px 0 12px; border-bottom: 1px solid var(--line); }
 .dlg-tabs button {
@@ -704,7 +715,7 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .cb-row .icon-x { height: 32px; }
 .cb-empty { color: var(--muted); font-size: 12.5px; padding: 8px 0; line-height: 1.5; }
 /* why Save didn't: under the field it is about */
-.field-error { color: var(--err); font-size: 12.5px; margin: 0 0 6px; }
+.field-error { color: var(--err); font-size: 12.5px; margin: 0 0 6px; scroll-margin-bottom: 8px; }
 .field + .field-error { margin: -10px 0 12px; }
 .dlg-actions { display: flex; gap: 8px; align-items: center; }
 .dlg-actions .btn-outline, .dlg-actions .btn-primary { height: 32px; padding: 0 14px; border-radius: 8px; font-size: 13px; }

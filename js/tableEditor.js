@@ -201,7 +201,7 @@ function setPill(b, on, { locked = false, gone = false, title }) {
 }
 
 // Placeholders and pills that depend on other fields (Id is the PK unless another column says pk, or a PK row is over
-// columns), and the line that says a key over several columns is on the Combined tab
+// columns), and the hints
 function refreshHints() {
   const explicitPk = writesKey(), key = keyRow();
   const pkCount = dlg.cols.filter(c => c.pk && c.name.trim()).length;
@@ -235,9 +235,20 @@ function refreshHints() {
     });
     row.querySelector('.c-type').placeholder = isId || c.ref ? 'int' : 'vc';
   }
-  const hint = $('#tdKeyHint');
-  hint.hidden = !key?.chips.length;
-  if (key) hint.textContent = `The primary key is over ${key.chips.map(ch => chipName(ch) || 'no name').join(', ')}: change it on Combined.`;
+  renderHints();
+}
+
+// The band above Save: on the Columns tab, what the Combined tab holds that the rows don't show, as the diagram's
+// footer writes it
+function renderHints() {
+  const onCols = dlg.tab === 'cols', key = keyRow(), names = r => r.chips.map(ch => chipName(ch) || 'no name').join(', ');
+  const others = dlg.rows.filter(r => r.kind !== 'pk' && r.chips.length).map(r => `${r.kind} (${names(r)})`);
+  const hints = [
+    [$('#tdKeyHint'), onCols && key?.chips.length ? `The primary key is over ${names(key)}: change it on Combined.` : ''],
+    [$('#tdCombinedHint'), onCols && others.length ? `Also on Combined: ${others.join(', ')}.` : ''],
+  ];
+  for (const [el, text] of hints) { el.textContent = text; el.hidden = !text; }
+  $('#tdHints').hidden = hints.every(([, text]) => !text);
 }
 
 tdCols.addEventListener('input', e => {
@@ -318,6 +329,7 @@ function addColumn() {
   dlg.cols.push(blankCol());
   renderCols();
   tdCols.querySelector(`.col-row[data-i="${dlg.cols.length - 1}"] .c-name`).focus();
+  $('#tdAdd').scrollIntoView({ block: 'nearest' }); // the focus shows the row alone: Add, under it, too
 }
 $('#tdAdd').onclick = addColumn;
 
@@ -332,7 +344,7 @@ function showTab(tab) {
   }
   $('#tdColsPane').hidden = tab !== 'cols';
   $('#tdCombinedPane').hidden = tab !== 'combined';
-  if (tab === 'combined') renderCombined(); // the columns' names as typed
+  if (tab === 'combined') { renderCombined(); renderHints(); } // the columns' names as typed
   else refreshHints(); // the pills as the rows say
 }
 for (const b of dlgEl.querySelectorAll('.dlg-tabs [data-tab]')) b.onclick = () => { if (dlg.fk) closeFk(); showTab(b.dataset.tab); };
@@ -460,6 +472,7 @@ function addCombined() {
   dlg.rows.push({ kind: 'index', chips: [], comment: '' });
   renderCombined();
   tdCombined.querySelector(`.cb-row[data-r="${dlg.rows.length - 1}"] .cb-kind`)?.focus();
+  $('#tdAddCombined').scrollIntoView({ block: 'nearest' });
 }
 $('#tdAddCombined').onclick = addCombined;
 
@@ -471,6 +484,7 @@ function openFk(i) {
   dlg.fk = { row: i, table: c.ref, usePk: !c.refCol, col: c.refCol, filter: '' };
   renderCols();
   $('#fkFilter').focus();
+  tdCols.querySelector('.fk-panel').scrollIntoView({ block: 'nearest' }); // its OK too
 }
 
 function closeFk() {
@@ -603,6 +617,7 @@ function fail(input, msg) {
   err.textContent = msg;
   err.style.paddingLeft = input.getBoundingClientRect().left - at.getBoundingClientRect().left + 'px';
   at.after(err);
+  err.scrollIntoView({ block: 'nearest' });
 }
 
 function clearError() {
