@@ -534,6 +534,68 @@ for (const name of ['rental', 'shop', 'store', 'four', 'school']) {
   assert.equal(api.routeEdges(edges, [...boxes.values()]).searched, 0, 'a new table stands out of line');
   validate({ boxes, edges }, 'a new table');
 }
+// A table made at a spot on the canvas stands there; where it would cover a table, on the grid point nearest the spot
+// that is as far from every table as a new table keeps. The table under it stays, and it is shown. A table grown by an
+// edit into another moves the same way; grown clear of the others, over a table it already covered (put there by the
+// user), or bigger because the boxes are measured another way (a toggle), it stays.
+{
+  const place = (nodes, sizes = {}) => api.ensurePositions(nodes, new Map(nodes.map(t => [t, { w: 190, h: 80, ...sizes[t.name] }])));
+  const two = model('A\n  Id\n\nB\n  Id\n'), three = model('A\n  Id\n\nB\n  Id\n\nC\n  Id\n');
+  clearSpots();
+  api.loaded();
+  api.pos.A = { x: 0, y: 0 };
+  api.placeNewTable('B', { x: 100, y: 40 });
+  place(two);
+  assert.deepEqual(api.pos.A, { x: 0, y: 0 }, 'the table a new one was made over moved');
+  assert.deepEqual([api.pos.B, api.revealName], [{ x: 90, y: 120 }, 'B'], 'a table made over another is not on the free grid point nearest, or not shown');
+  api.placeNewTable('C', { x: 515, y: 7 });
+  place(three);
+  assert.deepEqual([api.pos.C, api.revealName], [{ x: 515, y: 7 }, 'C'], 'a table made on free canvas is not where it was made, or not shown');
+
+  clearSpots();
+  Object.assign(api.pos, { A: { x: 0, y: 0 }, B: { x: 0, y: 150 }, C: { x: 600, y: 0 } });
+  place(three);
+  place(three, { A: { h: 200 } });
+  assert.deepEqual(api.pos.B, { x: 0, y: 150 }, 'the table grown into moved');
+  assert.deepEqual([api.pos.A, api.revealName], [{ x: 0, y: -90 }, 'A'], 'a table grown into another is not on the free grid point nearest, or not shown');
+  place(three, { A: { w: 300, h: 200 } });
+  assert.deepEqual(api.pos.A, { x: 0, y: -90 }, 'a table grown clear of the others moved');
+  api.pos.C = { x: 100, y: -60 };
+  place(three, { A: { w: 300, h: 200 } });
+  place(three, { A: { w: 300, h: 200 }, C: { w: 250 } });
+  assert.deepEqual(api.pos.C, { x: 100, y: -60 }, 'a table grown over one it already covered moved');
+  api.state.indexes = false;
+  place(three, { A: { w: 300, h: 400 }, C: { w: 250 } });
+  api.state.indexes = true;
+  assert.deepEqual(api.pos.A, { x: 0, y: -90 }, 'a table bigger by a toggle moved');
+}
+// A tall table made over any table of a laid-out diagram, or any table grown to three times its height: on no other
+// table, on the grid, every other table where it was; among 300 tables, at once
+{
+  const wide = 'Wide\n  Id' + Array.from({ length: 12 }, (_, i) => `\n  C${String(i + 1).padStart(2, '0')} int`).join('');
+  const dims = nodes => new Map(nodes.map(t => [t, { w: BOX_W, h: boxH(t) }]));
+  for (const name of ['rental', 'shop', 'store', 'school', 'random300x3']) {
+    const { text } = corpus.find(s => s.name === name), laid = run(text).nodes, spots = structuredClone(api.pos), withWide = model(`${text}\n${wide}`);
+    laid.forEach((under, i) => {
+      if (name === 'random300x3' && i !== laid.length >> 1) return;
+      for (const grown of [false, true]) {
+        const label = `${name}, ${grown ? 'grown:' : 'a table made over'} ${under.name}`, nodes = grown ? laid : withWide, sizes = dims(nodes), moved = grown ? under.name : 'Wide';
+        clearSpots();
+        for (const [k, p] of Object.entries(spots)) api.pos[k] = { ...p };
+        api.loaded();
+        if (grown) { api.ensurePositions(nodes, sizes); sizes.get(under).h *= 3; }
+        else api.placeNewTable('Wide', { x: spots[under.name].x + 10, y: spots[under.name].y + 10 });
+        const started = process.hrtime.bigint();
+        api.ensurePositions(nodes, sizes);
+        assert(ms(started) < 500, `${label}: took ${ms(started).toFixed(0)} ms`);
+        const at = api.pos[moved];
+        assert.equal(metrics({ boxes: new Map(nodes.map(t => [t, { ...api.pos[t.name], ...sizes.get(t) }])), edges: [] }).overlaps, 0, `${label}: on another table`);
+        assert(at.x % api.GRID === 0 && at.y % api.GRID === 0, `${label}: off the grid at ${at.x} ${at.y}`);
+        for (const t of laid) if (t.name !== moved) assert.deepEqual([api.pos[t.name].x, api.pos[t.name].y], [spots[t.name].x, spots[t.name].y], `${label}: ${t.name} moved`);
+      }
+    });
+  }
+}
 
 // Tables dragged about, never nearer than 40 to each other: every arrow still finds a way that
 // touches no table. And tables all nudged a little are still columns: no search.

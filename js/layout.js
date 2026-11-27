@@ -150,6 +150,30 @@ function bestSpot(t, placed, dims, edges, anchor = null) {
   return best;
 }
 
+// Where box r ({ x, y, w, h }) stands among the boxes `rects`: where it is, unless it covers a box it did not cover at
+// its size before, `was` ({ w, h }, null for a new one); then on the grid point nearest its spot where it stands as far
+// from every box as a new table does, or else right of them all. Boxes it covered already don't move it: the user put
+// it on them. Returns the spot it moves to, null where it stays.
+function clearSpot(r, rects, was) {
+  if (!rects.some(o => rectsTouch(r, o) && !(was && rectsTouch({ x: r.x, y: r.y, ...was }, o)))) return null;
+  // ring k: the grid points k steps across or down from the one nearest the spot, none nearer it than k - 1/2 steps
+  const gx = onGrid(r.x), gy = onGrid(r.y);
+  let best = Infinity, spot = null, work = LAYOUT.WORK;
+  for (let k = 0; work > 0 && !(k && ((k - 0.5) * GRID) ** 2 >= best); k++) {
+    const side = 2 * k;
+    for (let n = 0; n < Math.max(4 * side, 1); n++) {
+      const [i, j] = n < side ? [n - k, -k] : n < 2 * side ? [k, n - side - k] : n < 3 * side ? [k - (n - 2 * side), k] : [-k, k - (n - 3 * side)];
+      const x = gx + i * GRID, y = gy + j * GRID, d = (x - r.x) ** 2 + (y - r.y) ** 2;
+      if (d >= best) continue;
+      work -= rects.length;
+      if (!rects.some(o => tooClose({ x, y, w: r.w, h: r.h }, o))) { best = d; spot = { x, y }; }
+    }
+  }
+  if (spot) return spot;
+  const all = bboxOf(rects);
+  return { x: onGrid(all.x + all.w + LAYOUT.GAP_X * 2), y: gy };
+}
+
 // ─── Auto layout ────────────────────────────────────────────────────────────
 // A layered layout, as dot, dagre and ELK do it. Per group of connected tables: layers from
 // the FKs (referenced tables to the right), a lane in every column a line passes, the order
