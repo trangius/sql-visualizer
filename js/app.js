@@ -404,7 +404,10 @@ window.addEventListener('pagehide', () => { if (saveTimer) saveNow(); });
 
 function parseCurrent() {
   const r = state.mode === 'text' ? parseText(ta.value) : parseSQL(ta.value, state.dialect);
-  r.problems.push(...resolve(r.tables, state.implicit), ...dialectProblems(r.tables, state.dialect));
+  const own = resolve(r.tables, state.implicit), engine = dialectProblems(r.tables, state.dialect);
+  // a column's type the database hasn't is said by its error, not the text's warning too
+  const typed = new Set(engine.filter(p => p.kind === 'type').map(p => p.col));
+  r.problems.push(...own.filter(p => !(p.kind === 'type' && typed.has(p.col))), ...engine);
   return r;
 }
 

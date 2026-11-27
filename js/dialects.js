@@ -186,6 +186,29 @@ const foreignKeys = tables => links(tables).filter(({ c }) => leadsFk(c)); // th
 
 // ─── What the databases refuse ───────────────────────────────────────────────
 
+// A type's name, up to its size, its array's brackets or its next word: "int[]" → "int"
+const typeHead = t => t.match(/^[^( []*/)[0];
+// Whether the database has the type, by its name (its first word), as jaidb's p_type_name_known says: one of the text's,
+// which it is written as one it has, its own spelling of one (D.varchar, D.types) or one of D.otherTypes; any where
+// D.anyType (a column needs none); where D.definesTypes (a database may make types of its own), any of one name, which
+// only its sizes follow, and where D.arrays an array's brackets or ARRAY
+function typeNameKnown(type, D) {
+  if (D.anyType) return true;
+  const head = typeHead(type).toLowerCase(), rest = type.slice(head.length);
+  if (!head) return false;
+  const spelled = [D.varchar, ...Object.values(D.types ?? {}).flatMap(row => row.slice(0, 2))].filter(Boolean).map(s => typeHead(s).toLowerCase());
+  if (SQL_TYPE_NAMES.has(head) || spelled.includes(head) || (D.otherTypes ?? []).includes(head)) return true;
+  return !!D.definesTypes && rest.replace(/\([^)]*\)?|\[[^\]]*\]?/g, ' ').trim().split(/\s+/).every(w => !w || (D.arrays && /^array$/i.test(w)));
+}
+// A written type the database hasn't, in jaidb's words (unknown_type_problem): an error about the column's type, with
+// the nearest of the types it offers (D.typeOffers, as it writes them), its other types and the text's where one is
+// near, in the case the type was written in
+const unknownTypeProblems = (tables, D) => tables.flatMap(t => t.cols.filter(c => c.type && !typeNameKnown(c.type, D)).map(c => {
+  const head = typeHead(c.type), shouted = head !== head.toLowerCase() && head === head.toUpperCase();
+  const near = closest(head.toLowerCase(), [...(D.typeOffers ?? []).map(o => typeHead(typeSQL(o, D)).toLowerCase()), ...(D.otherTypes ?? []), ...SQL_TYPE_NAMES]);
+  return problem(c.line, `${c.type} is not a type ${D.name} has` + (near ? `. Did you mean ${shouted ? near.toUpperCase() : near}?` : ''), 'error', { kind: 'type', col: c });
+}));
+
 // A foreign key to a column that is no key but begins one over several columns or an index (resolve says so of
 // it, and of one to a column that begins none): where the database points none so (!D.pointsAtIndexes), in jaidb's words
 const indexKeyProblems = (tables, D) => D.pointsAtIndexes ? [] : links(tables)
@@ -319,6 +342,15 @@ const MARIADB_NATIVE = [...SPATIAL, 'enum', 'set'];
 const MARIADB_SIZE_LIMITS = { char: [255, 'vc(%)'], binary: [255, 'varbinary(%)'] };
 const MARIADB_UNPRIMARY = [...TEXT_TYPES, ...BLOB_TYPES, 'geometry', 'linestring', 'polygon'];
 const MARIADB_PRIMARY_SIZES = { vc: 768, char: 768, varbinary: 3072, binary: 3072 };
+// The types MariaDB offers a column, most used first (jaidb's type_offers that every version has; MySQL's are the
+// same), and the first words of its types the text has no word for and of its other spellings of the text's (INT4,
+// FLOAT8, MIDDLEINT, CHARACTER VARYING, NATIONAL VARCHAR, NCHAR VARCHAR, LONG VARBINARY); MySQL's, and GEOMCOLLECTION
+const MARIADB_OFFERS = ['int', 'bigint', 'smallint', 'tinyint', 'mediumint', 'vc', 'char', 'text', 'tinytext', 'mediumtext', 'longtext',
+  'decimal', 'double', 'float', 'date', 'datetime', 'timestamp', 'time', 'blob', 'tinyblob', 'mediumblob', 'longblob', 'binary', 'varbinary',
+  'bit', 'enum', 'set', 'geometry', 'point', 'linestring', 'polygon'];
+const MARIADB_OTHER_TYPES = ['int1', 'int2', 'int3', 'int4', 'int8', 'middleint', 'float4', 'float8', 'character', 'nchar', 'nvarchar',
+  'national', 'long', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'vector'];
+const MYSQL_OTHER_TYPES = [...MARIADB_OTHER_TYPES, 'geomcollection'];
 // A foreign key joins numbers of one type and sign, and strings, binaries, decimals and times of any size
 const MARIADB_KEY_KINDS = { VARCHAR: 'string', CHAR: 'string', VARBINARY: 'binary', BINARY: 'binary', DATETIME: 'datetime', TIMESTAMP: 'datetime',
   TINYINT: 'tinyint', BOOL: 'tinyint' };
@@ -340,6 +372,8 @@ const PG_TYPES = {
   ...typeRows(TEXT_TYPES, ['TEXT']), ...typeRows([...BLOB_TYPES, 'binary', 'varbinary'], ['BYTEA']), year: ['SMALLINT'],
 };
 const PG_NATIVE = ['uuid', 'inet', 'cidr', 'macaddr', 'interval', 'json', 'jsonb', 'xml', 'point', 'polygon', 'money'];
+const PG_OFFERS = ['int', 'bigint', 'smallint', 'vc', 'char', 'text', 'decimal', 'double', 'float', 'date', 'datetime', 'timestamptz', 'time',
+  'timetz', 'interval', 'bool', 'uuid', 'json', 'jsonb', 'blob', 'inet', 'cidr', 'macaddr', 'money', 'xml', 'point', 'polygon'];
 // A foreign key joins integers, floats, dates and times, strings and networks each of one kind, and points from a
 // number at a wider kind of number and from a time at a time with a zone or an interval, which it converts to;
 // not the other way (jaidb's key_type_kinds and key_type_widenings)
@@ -356,6 +390,8 @@ const MSSQL_TYPES = {
   mediumint: ['INT'], int: ['INT', 'BIGINT'], datetime: ['DATETIME2'], timestamp: ['DATETIME2'], double: ['FLOAT'], float: ['REAL'], bool: ['BIT'],
   ...typeRows([...TEXT_TYPES, 'json'], ['NVARCHAR(MAX)']), ...typeRows(BLOB_TYPES, ['VARBINARY(MAX)']), uuid: ['UNIQUEIDENTIFIER'], year: ['SMALLINT'],
 };
+const MSSQL_OFFERS = ['int', 'bigint', 'smallint', 'tinyint', 'vc', 'char', 'text', 'decimal', 'double', 'float', 'date', 'datetime',
+  'timestamptz', 'time', 'bool', 'uuid', 'blob', 'binary', 'varbinary', 'money', 'xml', 'geometry'];
 const MSSQL_SIZE_LIMITS = { vc: [4000, 'text'], char: [8000, 'text'], binary: [8000, 'blob'], varbinary: [8000, 'blob'], bit: [1, 'bigint'] };
 const mssqlType = t => typeSQL(t, DIALECTS.mssql);
 const isMax = t => /\(MAX\)/.test(mssqlType(t));
@@ -546,7 +582,8 @@ function oracleProblems(tables) {
 // Sample rows (sampleInserts): dataStart/dataEnd go around them, dataTable(t) around each table's; serverMade: the types
 // whose values the server gives, which they leave out.
 // What a foreign key's types must be (keyTypesFit): keyLengthsMayDiffer, keyTypeKinds, keyTypeWidenings,
-// defaultFraction, and keyTypesNeeded to say it.
+// defaultFraction, and keyTypesNeeded to say it. The types it has (typeNameKnown): otherTypes, anyType, definesTypes,
+// arrays; typeOffers, the nearest of which a misspelt one is likely meant as.
 
 const sqlStr = s => `'${s.replace(/'/g, "''")}'`;
 const upperBool = b => b ? 'TRUE' : 'FALSE';
@@ -561,6 +598,7 @@ const MARIADB = {
   types: MARIADB_TYPES, native: MARIADB_NATIVE, sizeLimits: MARIADB_SIZE_LIMITS, varchar: 'VARCHAR', signWords: true,
   keyLengthsMayDiffer: true, keyTypeKinds: MARIADB_KEY_KINDS, keyTypesNeeded: 'of one type and sign, their sizes aside',
   unprimary: MARIADB_UNPRIMARY, primarySizeLimits: MARIADB_PRIMARY_SIZES, pointsAtIndexes: true,
+  typeOffers: MARIADB_OFFERS, otherTypes: MARIADB_OTHER_TYPES,
   names: { name: mariadbName, own: ['pk'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema', index: 'table' }, max: 64 },
   autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, uniqueApart: true, enumCheck: false,
   keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
@@ -574,6 +612,7 @@ const DIALECTS = {
   mariadb: MARIADB,
   mysql: {
     ...MARIADB, name: 'MySQL', q: quoter(MYSQL_RESERVED, '`'), problems: mysqlProblems, native: MYSQL_NATIVE, unkeyable: MYSQL_UNKEYABLE,
+    otherTypes: MYSQL_OTHER_TYPES,
     keyBytes: 3072, keyPartBytes: MYSQL_KEY_PARTS,
     pointsAtIndexes: false, // 8.4 refuses a foreign key to what is no key; with no version known, so do they all
     // a default other than a plain value, or on TEXT, BLOB or JSON, is an expression in parentheses
@@ -582,6 +621,7 @@ const DIALECTS = {
   sqlite: {
     ...COMMON, name: 'SQLite', q: quoter(SQLITE_KEYWORDS, '"'), types: SQLITE_TYPES, varchar: 'VARCHAR',
     native: SQLITE_NATIVE, names: givenNames(Infinity, 'table', 'schema'), maxName: Infinity, // a name may be any length
+    anyType: true, // any name is a type's, which only says how a value is kept
     autoSQL: ' PRIMARY KEY AUTOINCREMENT', numberingIsKey: true, fkInline: true, // tables may point to tables made later
     keysAtStart: cyclic => [cyclic ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;'], keysOn: 'PRAGMA foreign_keys = ON;',
     problems: tables => [...indexKeyProblems(tables, DIALECTS.sqlite), ...keyOverProblems(tables, DIALECTS.sqlite)], // SQLite doesn't compare the types
@@ -590,6 +630,8 @@ const DIALECTS = {
   postgres: {
     ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"', '"', true), schema: 'public', maxName: 63,
     types: PG_TYPES, native: PG_NATIVE, varchar: 'VARCHAR', unkeyable: ['json', 'point', 'polygon', 'xml'],
+    // what starts its types of several words the text has no word for (CHARACTER VARYING, NATIONAL CHARACTER, NCHAR VARYING)
+    typeOffers: PG_OFFERS, otherTypes: ['character', 'nchar', 'national'], definesTypes: true, arrays: true,
     keyLengthsMayDiffer: true, keyTypeKinds: PG_KEY_KINDS, keyTypeWidenings: PG_KEY_WIDENINGS,
     keyTypesNeeded: "of one kind, or the first of a type it converts to the second's by itself",
     names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema', index: 'schema' }, max: 63, exact: true },
@@ -606,6 +648,8 @@ const DIALECTS = {
   mssql: {
     ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', maxName: 128, nPrefix: true,
     types: MSSQL_TYPES, native: ['geometry', 'money', 'xml', 'rowversion'], sizeLimits: MSSQL_SIZE_LIMITS, varchar: 'NVARCHAR',
+    // what starts its types of several words the text has no word for (CHARACTER VARYING, NATIONAL CHAR VARYING)
+    typeOffers: MSSQL_OFFERS, otherTypes: ['character', 'national'], definesTypes: true,
     unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema', 'table'),
     defaultFraction: { size: '(7)', types: ['TIME', 'DATETIMEOFFSET', 'DATETIME2'] }, keyTypesNeeded: 'of the same type and size',
     autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
@@ -621,6 +665,9 @@ const DIALECTS = {
   oracle: {
     ...COMMON, name: 'Oracle', q: quoter(ORACLE_RESERVED, '"'), maxName: 128, indexNames: givenNames(128, 'schema', 'schema'),
     type: oracleType, problems: oracleProblems, dropTail: 'CASCADE CONSTRAINTS', defaultFirst: true, skipIndexes: oracleSkipIndexes,
+    // its object types are types of its own; what starts those of several words the text has no word for (CHARACTER
+    // VARYING, NATIONAL CHAR, NCHAR VARYING, LONG RAW)
+    otherTypes: ['character', 'national', 'nchar', 'long'], definesTypes: true,
     // the identity says the rest; a key to a table made later is checked at COMMIT, so sample rows can go in in any order
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', autoAlone: true, deferredTail: ' DEFERRABLE INITIALLY DEFERRED',
     noActions: ['no action', 'restrict'], // what it does anyway
@@ -638,7 +685,7 @@ function genSQL(tables, dialect = 'mariadb') { return genSchema(tables, dialectO
 // What the database refuses (or warns about) in the diagram, and what the script writes otherwise
 function dialectProblems(tables, dialect = 'mariadb') {
   const D = dialectOf(dialect);
-  return [...D.problems(tables), ...standInNotes(tables, D), ...shapelessNotes(tables)];
+  return [...unknownTypeProblems(tables, D), ...D.problems(tables), ...standInNotes(tables, D), ...shapelessNotes(tables)];
 }
 
 // A type the database hasn't, written as the one that stands in for it (standIn), or an unsigned number as the

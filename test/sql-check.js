@@ -328,6 +328,14 @@ Pet
   Id
   Name [delete cascade]
 `, 'is for a foreign key'],
+  // the text only warns of a type it doesn't know; a database that hasn't it refuses it, with the nearest it has
+  'types a database lacks': [`Thing
+  Id
+  Size intt
+  Price doubl precision
+`, { mariadb: 'intt is not a type MariaDB has. Did you mean int?', mysql: 'intt is not a type MySQL has. Did you mean int?',
+    postgres: 'doubl precision is not a type PostgreSQL has. Did you mean double?', mssql: 'doubl precision is not a type SQL Server has. Did you mean double?',
+    oracle: 'doubl precision is not a type Oracle has. Did you mean double?' }],
   'enum keeps its case': [`Shirt
   Id
   Size enum('Small','Large')

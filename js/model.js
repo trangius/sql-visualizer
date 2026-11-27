@@ -14,7 +14,9 @@ const IDENT = /^[\p{L}_][\p{L}\p{N}_$]*$/u;
 const isIdName = n => n.toLowerCase() === 'id';
 const DEFAULT_VC = 128;
 const INT_TYPES = new Set(['int', 'integer', 'bigint', 'smallint', 'mediumint', 'tinyint']);
-const problem = (line, msg, level = 'error') => ({ line, msg, level });
+// `about` says what a problem is about where that tells it from others: { kind: 'type', col } for a column's type, which
+// the text warns of where it doesn't know it (resolve) and a database's error may say again (dialectProblems)
+const problem = (line, msg, level = 'error', about = {}) => ({ line, msg, level, ...about });
 const snap = v => Math.round(v / 10) * 10; // the diagram's 10px grid
 // Two names in the order of their UTF-8 bytes, which is the order of their code points (not of
 // JavaScript's UTF-16 units: those put a name beyond the BMP before one in U+E000…U+FFFF)
@@ -253,8 +255,9 @@ function defaultType(c, seen = new Set()) {
 function effType(c, seen) { return c.type ? normType(c.type) : defaultType(c, seen); }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-// A written type must be a real MariaDB type (plus our vc), so typos don't slip through:
-// "Name vc uniqie" would otherwise quietly become a column of type "vc uniqie".
+// The types the text knows, as jaidb's text has them (plus our vc). A database's own type the text doesn't know goes
+// through as written, only warned about in case it is a typo: "Name vc uniqie" is meant as "Name vc unique". Whether
+// the database has it is the database's error (dialectProblems).
 
 const SQL_TYPE_NAMES = new Set(`vc tinyint smallint mediumint int integer bigint decimal dec numeric fixed float
 double real bit bool boolean serial char varchar binary varbinary tinytext text mediumtext longtext tinyblob
@@ -446,7 +449,7 @@ function resolve(tables, implicit = false) {
       c.effType = effType(c);
       if (c.type) {
         const bad = typeProblem(c.type);
-        if (bad) problems.push(problem(c.line, bad));
+        if (bad) problems.push(problem(c.line, bad, 'warn', { kind: 'type', col: c }));
       }
       c.isPk = t.pkCols.includes(c);
       // the database numbers the rows: an integer Id that is the key on its own, or auto_increment on such a column
