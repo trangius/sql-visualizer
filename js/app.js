@@ -107,29 +107,35 @@ function lineHues(tables) {
 }
 const redecorate = () => decorateEditor(lastProblems);
 
-// Status bar: the first problem (click to jump there), and the diagram's size
-let firstProblem = null, problemsShown = []; // the problems as listed
+// Status bar: how many errors and warnings there are (click to list them), and the diagram's size
+let firstProblem = null, problemsShown = []; // the problems as listed: the errors, then the warnings, each by line
 function updateStatus(problems) {
-  const sorted = [...problems].sort((a, b) => (a.line ?? 0) - (b.line ?? 0) || (a.level === 'error' ? -1 : 1));
+  const byLine = (a, b) => (a.line ?? 0) - (b.line ?? 0);
+  const errors = problems.filter(p => p.level === 'error').sort(byLine), warnings = problems.filter(p => p.level !== 'error').sort(byLine);
+  const sorted = [...errors, ...warnings];
   firstProblem = sorted[0] ?? null;
   const btn = $('#statusBtn'), n = problems.length;
   btn.classList.toggle('has-problems', n > 0);
-  btn.classList.toggle('error', problems.some(p => p.level === 'error'));
-  btn.classList.toggle('warn', n > 0 && !problems.some(p => p.level === 'error'));
-  $('#statusText').textContent = !n
-    ? (state.mode === 'sql' ? `${dialectOf(state.dialect).name} · No problems` : 'No problems')
-    : `${n} problem${n > 1 ? 's' : ''} · ${firstProblem.line ? 'Line ' + firstProblem.line + ': ' : ''}${firstProblem.msg}`;
+  btn.classList.toggle('error', errors.length > 0);
+  btn.classList.toggle('warn', n > 0 && !errors.length);
+  const count = (list, word, level) => list.length ? [`<span class="count ${level}">${list.length} ${word}${list.length > 1 ? 's' : ''}</span>`] : [];
+  $('#statusText').innerHTML = !n
+    ? esc(state.mode === 'sql' ? `${dialectOf(state.dialect).name} · No problems` : 'No problems')
+    : [...count(errors, 'error', 'error'), ...count(warnings, 'warning', 'warn')].join(' · ');
   $('#statusText').title = n ? 'Click to see all problems' : '';
-  // a problem fixed by creating the missing table: a button for it, beside the first one and in the list
+  // a problem fixed by creating the missing table: a button for it in the status bar when it is the first, and in the list
   const fix = p => p.create ? `Create table ${p.create.table}` : '';
   $('#fixBtn').hidden = !firstProblem?.create;
   $('#fixBtn').textContent = fix(firstProblem ?? {});
-  // the expandable list of every problem (closes by itself when there are none)
-  $('#problemList').innerHTML = sorted.map((p, i) =>
-    `<div class="problem-row" role="listitem"><button class="problem ${p.level}" data-line="${p.line ?? ''}">` +
+  // the expandable list of every problem, the errors and then the warnings under their headings (it closes by itself
+  // when there are none)
+  const row = (p, i) => `<div class="problem-row" role="listitem"><button class="problem ${p.level}" data-line="${p.line ?? ''}">` +
     `<span class="dot"></span><span class="where">${p.line ? 'Line ' + p.line : ''}</span>` +
     `<span>${esc(p.msg)}</span></button>` +
-    (p.create ? `<button class="btn-outline fix-btn" data-fix="${i}">${esc(fix(p))}</button>` : '') + '</div>').join('');
+    (p.create ? `<button class="btn-outline fix-btn" data-fix="${i}">${esc(fix(p))}</button>` : '') + '</div>';
+  const group = (list, from, heading, level) => list.length ? `<div class="problem-heading ${level}">${heading}</div>` +
+    `<div role="list" aria-label="${heading}">${list.map((p, k) => row(p, from + k)).join('')}</div>` : '';
+  $('#problemList').innerHTML = group(errors, 0, 'Errors', 'error') + group(warnings, errors.length, 'Warnings', 'warn');
   problemsShown = sorted;
   if (!n) setProblemList(false);
   const tables = model.tables ?? [];
