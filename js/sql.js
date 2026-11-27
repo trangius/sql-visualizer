@@ -131,14 +131,14 @@ function parseSQL(src, dialect = 'mariadb') {
       const kind = p.eatW('UNIQUE', 'FULLTEXT', 'SPATIAL')?.u, plain = indexKind(p);
       if (p.eatW('INDEX', 'KEY')) { createIndex(p, kind, plain, line, findAcc, warn, error); continue; }
       if (!p.eatW('TABLE')) {
-        if (!p.isW('DATABASE', 'SCHEMA')) warn(line, `CREATE ${p.peek()?.v ?? ''} is not shown in the diagram. Ignored.`);
+        if (!p.isW('DATABASE', 'SCHEMA')) warn(line, `The diagram can't show CREATE ${(p.peek()?.v ?? '').toUpperCase()}`.trim());
         continue;
       }
       if (p.eatW('IF')) { p.eatW('NOT'); p.eatW('EXISTS'); }
       const name = p.qname();
       if (!name) { error(line, 'CREATE TABLE without a name'); continue; }
       const body = p.group();
-      if (!body) { warn(line, `CREATE TABLE ${name.v} without a column list. Ignored.`); continue; }
+      if (!body) { warn(line, `The diagram can't show CREATE TABLE ${name.v} without a column list`); continue; }
       if (findAcc(name.v)) { error(name.line, `Table ${name.v} is created twice`); continue; }
       const acc = { name: name.v, line: name.line, cols: [], pk: null, fks: [], uniques: [], indexes: [] };
       accs.push(acc);
@@ -146,7 +146,7 @@ function parseSQL(src, dialect = 'mariadb') {
     } else if (kw === 'ALTER') {
       p.next();
       p.eatW('IGNORE');
-      if (!p.eatW('TABLE')) { warn(line, 'ALTER statement ignored'); continue; }
+      if (!p.eatW('TABLE')) { warn(line, `The diagram can't show ALTER ${(p.peek()?.v ?? '').toUpperCase()}`.trim()); continue; }
       p.eatW('ONLY'); // pg_dump
       const name = p.qname();
       if (p.eatW('WITH')) p.eatW('CHECK', 'NOCHECK'); // SQL Server Management Studio
@@ -155,7 +155,7 @@ function parseSQL(src, dialect = 'mariadb') {
       for (const clause of splitTop(st.slice(p.i))) {
         const c = new Cursor(clause);
         if (c.isW('CHECK', 'NOCHECK', 'OWNER')) continue; // turns checking on or off, or names an owner
-        if (!c.eatW('ADD')) { warn(clause[0].line, `ALTER TABLE … ${clause[0].v} is not supported. Ignored.`); continue; }
+        if (!c.eatW('ADD')) { warn(clause[0].line, `The diagram can't show ALTER TABLE … ${clause[0].v.toUpperCase()}`); continue; }
         c.eatW('COLUMN');
         parseDef(c, acc, warn, error);
       }
@@ -165,7 +165,7 @@ function parseSQL(src, dialect = 'mariadb') {
                 'COMMENT', 'GRANT', 'REVOKE'].includes(kw)) {
       // not part of the schema
     } else {
-      warn(line, `Statement starting with "${st[0].v}" ignored`);
+      warn(line, `The diagram can't show this ${st[0].v.toUpperCase()}`);
     }
   }
   return { tables: accs.map(a => finalizeTable(a, warn, error, dialect, findAcc)), problems };
@@ -203,7 +203,7 @@ function parseDef(p, acc, warn, error) {
     if (cols && before && indexKind(p) && !p.isW('INCLUDE')) acc.indexes.push({ name: name?.v ?? null, cols, line });
     else warn(line, NOT_PLAIN);
   } else if (p.isW('CHECK')) {
-    warn(line, 'CHECK constraints are not shown. Ignored.');
+    warn(line, "The diagram can't show CHECK constraints");
   } else {
     parseColumn(p, acc, warn, error);
   }
@@ -233,7 +233,7 @@ function createIndex(p, kind, plain, line, findAcc, warn, error) {
   else warn(line, NOT_PLAIN);
 }
 
-const NOT_PLAIN = 'An index the text has no word for is not kept in it: one of every row over whole columns, ascending, is';
+const NOT_PLAIN = "The diagram can't show this kind of index"; // it shows one of every row over whole columns, ascending
 // Past what says an index's kind where it comes, USING and its method, CLUSTERED or NONCLUSTERED: false where it is
 // none the text says (another method than a B-tree, a clustered one), else true
 function indexKind(p) {
@@ -343,7 +343,7 @@ function parseColumn(p, acc, warn, error) {
     if (p.eatW('CHECK')) {
       const values = enumCheck(p.group(), col.name);
       if (values && /^(text|n?varchar2?|n?char)\b/i.test(col.type ?? 'text')) col.type = `enum(${values})`; // how the others write an enum
-      else warn(line, 'CHECK constraints are not shown. Ignored.');
+      else warn(line, "The diagram can't show CHECK constraints");
       continue;
     }
     p.next(); // attribute we don't care about
