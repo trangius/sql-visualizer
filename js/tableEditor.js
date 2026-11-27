@@ -12,25 +12,32 @@ const MOVE_KEYS = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? n
 // the column's yes/no options, as pills: [field, label]. What belongs to one column is on it (indexed: an index over it
 // alone); what spans several columns is on the Combined tab, a row each.
 const FLAGS = [['pk', 'PK'], ['nullable', 'NULL'], ['unique', 'UNIQUE'], ['indexed', 'INDEX'], ['auto', 'AUTO']];
-// what a Combined row is: [kind, label], the kind as the text's word for it
-const KINDS = [['pk', 'PK'], ['unique', 'UNIQUE'], ['index', 'INDEX']];
+// what a Combined row is: [kind, label], the kind as the text's word for it; then FK, a foreign key, a form of its own
+const KINDS = [['pk', 'PK'], ['unique', 'UNIQUE'], ['index', 'INDEX'], ['fk', 'FK']];
+const ONE_COLUMN_KEYS = 'Keys over one column: on the Columns tab'; // under a foreign key's list of keys, which has those over several
 
 const dlgEl = $('#tableDlg'), tdName = $('#tdName'), tdCols = $('#tdCols'), tdCombined = $('#tdCombined');
 $('#typeList').innerHTML = TYPE_SUGGESTIONS.map(t => `<option value="${t}">`).join('');
 
-// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, pk, nullable, unique, indexed, auto, ref, refCol, comment }],
-//        rows: [{ kind, chips: [{ col } | { written }], comment }] }
+// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, openedType, pk, nullable, unique, indexed, auto, ref, refCol, comment }],
+//        rows: [{ kind, chips: [{ col } | { written }], comment, growing }], fks: [{ table, keyCols, cols, onDelete, onUpdate }] }
 // dlg.fk: the open foreign-key chooser { row, table, usePk, col, filter }
 // dlg.start: the dialog as it opened (see snapshot), to tell whether closing loses anything
 // dlg.tab: the tab shown, 'cols' or 'combined'
 // cols[].pk: the key alone (written pk); a column of a key over several columns is a chip of the PK row instead
+// cols[].openedType: the type it had as opened where none was written (its reference's, an Id's, vc), '' for one added here
 // dlg.rows: the Combined tab's rows, keys and indexes over several columns: the primary key (kind 'pk', one row at most),
 // then unique keys and indexes, each over its columns in order, a chip each: one of dlg.cols (col), or a name that is no
 // column of the table, kept as written for the text to report. A row over one column is that column's PK, UNIQUE or INDEX
-// once the dialog opens or saves (foldRows), not while it is edited.
+// (foldRows): once the Columns tab shows, unless it is still being filled in (growing: added here and not yet over several
+// columns), and once the dialog opens or saves.
+// dlg.fks: the Combined tab's foreign keys over several columns, after its rows. Each points at a key: table (another
+// table's name, or SELF; null while none is picked) and keyCols, the key's columns in its order as chips (another
+// table's by their names, written; this table's its columns, col); and for each of them, the column of this table that
+// points at it (cols, by keyCols; null while none is picked), whose own ref it is instead. The actions are kept as read.
 let dlg = null;
 
-const blankCol = () => ({ name: '', origName: null, type: '', pk: false, nullable: false, unique: false, indexed: false, auto: false, ref: null, refCol: null, comment: '' });
+const blankCol = () => ({ name: '', origName: null, type: '', openedType: '', pk: false, nullable: false, unique: false, indexed: false, auto: false, ref: null, refCol: null, comment: '' });
 const inlineComment = line => { const i = commentAt(line ?? ''); return i >= 0 ? line.slice(i).trim() : ''; };
 const lc = s => s.toLowerCase();
 const keyed = (cls, h) => ` class="${cls}${h == null ? '' : ' h-hue'}"${h == null ? '' : ` style="--h:${h}"`}`; // an element in a key's colour
@@ -79,7 +86,7 @@ function openTableEditor(name, at = null, col = null) {
   dlg = { orig: t?.name ?? null, at, tables, fk: null, nameComment: t ? inlineComment(lines[t.line - 1]) : '' };
   dlg.cols = t
     ? t.cols.map(c => ({
-        name: c.name, origName: c.name, type: c.type ?? '', pk: false, nullable: c.nullable, unique: c.unique, indexed: false, auto: c.auto,
+        name: c.name, origName: c.name, type: c.type ?? '', openedType: c.type ? '' : c.effType, pk: false, nullable: c.nullable, unique: c.unique, indexed: false, auto: c.auto,
         ref: !c.ref ? null : c.target === t || (!c.target && lc(c.ref) === lc(t.name)) ? SELF : c.target?.name ?? c.ref,
         refCol: !c.ref ? null : !c.target ? c.refCol : pointsToPk(c) ? null : c.targetCol.name,
         onDelete: c.onDelete, onUpdate: c.onUpdate, default: c.default, // kept as they are: the dialog doesn't edit them
@@ -97,7 +104,15 @@ function openTableEditor(name, at = null, col = null) {
     ...(t.uniques ?? []).map(u => fromText('unique', u.cols, u.line)),
     ...(t.indexes ?? []).map(ix => fromText('index', ix.cols, ix.line)),
   ] : [];
+  // A foreign key over several columns (arrows that point at a key's columns together) is one on Combined
+  dlg.fks = (t?.fkGroups ?? []).map(g => {
+    const self = g.target === t, colOf = c => dlg.cols[t.cols.indexOf(c)], cols = g.cols.map(colOf);
+    for (const c of cols) c.ref = c.refCol = null;
+    return { table: self ? SELF : g.target.name, keyCols: g.targetCols.map(k => self ? { col: colOf(k) } : { written: k.name }),
+      cols, onDelete: g.cols[0].onDelete, onUpdate: g.cols[0].onUpdate };
+  });
   foldRows();
+  $('#toast').hidden = true; // its Undo, over the backdrop, would change the text the dialog edits
   $('#tdTitle').textContent = t ? `Edit table ${t.name}` : 'New table';
   $('#tdDelete').hidden = !t;
   disarmDelete();
@@ -119,9 +134,10 @@ function closeTableEditor() {
   dlg = null;
 }
 
-// The name, the columns and the keys and indexes that would be saved (empty rows aren't)
+// The name, the columns, the keys and indexes and the foreign keys over several columns that would be saved (empty
+// columns aren't)
 const snapshot = () => JSON.stringify([tdName.value, dlg.cols.filter(c => c.name.trim() || c.type.trim() || c.ref),
-  dlg.rows.map(r => [r.kind, r.chips.map(chipName)])]);
+  dlg.rows.map(r => [r.kind, r.chips.map(chipName)]), dlg.fks.map(f => [f.table, f.keyCols.map(chipName), f.cols.map(c => c && dlg.cols.indexOf(c))])]);
 
 // Esc and a click outside ask before throwing edits away (Cancel says what it does, so it doesn't)
 async function requestClose() {
@@ -145,8 +161,8 @@ function targetTables() {
     key: SELF, name: selfName, self: true,
     cols: dlg.cols.filter(c => c.name.trim()).map(c => ({
       name: c.name.trim(),
-      type: c.type.trim() || (isIdName(c.name.trim()) || c.ref ? 'int' : 'vc'),
-      isPk: c.pk || inKeyRow(c) || (!explicitPk && isIdName(c.name.trim())),
+      type: c.type.trim() || defaultFormType(c),
+      isPk: c.pk || inKeyRow(c) || keyedByName(c, explicitPk),
       unique: c.unique,
     })),
   };
@@ -156,11 +172,33 @@ function targetTables() {
   }));
   const all = [...others, self];
   for (const t of all) {
-    const pks = t.cols.filter(c => c.isPk);
-    t.pk = pks.length === 1 ? pks[0].name : null;
-    t.pkNote = pks.length === 1 ? pks[0].name : pks.length ? 'several columns' : 'none';
+    t.pkCols = t.cols.filter(c => c.isPk).map(c => c.name);
+    t.pk = t.pkCols.length === 1 ? t.pkCols[0] : null;
+    t.pkNote = t.pkCols.join(', ') || 'none';
   }
   return all.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+}
+
+// The type a column takes with none typed, as the text gives it: an Id an int, one of a foreign key over several columns
+// the type of its key column, one with a reference the type of the column it points to (int where there is none); else
+// the type it had as opened, which a reference given up or an Id renamed leaves it (Save writes it), or vc
+function defaultFormType(c, depth = 0) {
+  if (isIdName(c.name.trim())) return 'int';
+  const at = formOf(c), type = at && depth < 8 && refType(at.form.table, chipName(at.form.keyCols[at.k]), depth);
+  if (type) return type;
+  if (c.ref) return (depth < 8 && refType(c.ref, c.refCol, depth)) || 'int';
+  return c.openedType || 'vc';
+}
+
+// The type of the column a foreign key to `key` (a table's name, or SELF) and its refCol points to: refCol, else the
+// table's one primary key column; null where there is none
+function refType(key, refCol, depth) {
+  if (key !== SELF) {
+    const t = tableOf(key), col = !t ? null : refCol ? t.cols.find(c => lc(c.name) === lc(refCol)) : t.pkCols.length === 1 ? t.pkCols[0] : null;
+    return col?.effType ?? null;
+  }
+  const name = refCol ?? ownKeyColumn(), col = name && dlg.cols.find(c => lc(c.name.trim()) === lc(name));
+  return col ? col.type.trim() || defaultFormType(col, depth + 1) : null;
 }
 
 function refLabel(c) {
@@ -173,14 +211,17 @@ function refLabel(c) {
 
 function renderCols() {
   tdCols.innerHTML = dlg.cols.map((c, i) => {
-    const target = c.ref && refLabel(c);
+    const target = c.ref && refLabel(c), at = formOf(c);
     return `
     <div class="col-row${dlg.fk?.row === i ? ' fk-open' : ''}" data-i="${i}">
       <span class="grip" title="Drag to move (${MOVE_KEYS})">${GRIP_ICON}</span>
       <input class="c-name" value="${esc(c.name)}" placeholder="Column name" spellcheck="false" autocomplete="off">
       <input class="c-type" value="${esc(c.type)}" list="typeList" spellcheck="false" autocomplete="off">
       <div class="c-flags">${FLAGS.map(([f, label]) => `<button class="pill" data-act="flag" data-f="${f}">${label}</button>`).join('')}</div>
-      <div class="c-fk">${c.ref
+      <div class="c-fk">${at
+        ? `<div${keyed('fk-chip in-fk', fkHue(at.form))}><button class="fk-label" disabled title="In a foreign key over several columns: change it on Combined">` +
+            `→ ${esc((at.form.table === SELF ? tdName.value.trim() || 'this table' : at.form.table) + '.' + chipName(at.form.keyCols[at.k]))}</button></div>`
+        : c.ref
         ? `<div${keyed('fk-chip', refHue(c.ref, c.refCol))}>` +
             `<button class="fk-label" data-act="fk" title="Points to ${esc(target)}. Click to change">→ ${esc(target)}</button>` +
             `<button class="fk-unlink" data-act="unlink" title="Not a foreign key" aria-label="Not a foreign key">×</button></div>`
@@ -201,7 +242,7 @@ function setPill(b, on, { locked = false, gone = false, title }) {
 }
 
 // Placeholders and pills that depend on other fields (Id is the PK unless another column says pk, or a PK row is over
-// columns), and the line that says a key over several columns is on the Combined tab
+// columns), and the hints
 function refreshHints() {
   const explicitPk = writesKey(), key = keyRow();
   const pkCount = dlg.cols.filter(c => c.pk && c.name.trim()).length;
@@ -209,9 +250,9 @@ function refreshHints() {
     const c = dlg.cols[+row.dataset.i];
     const pill = f => row.querySelector(`.pill[data-f="${f}"]`);
     const isId = isIdName(c.name.trim());
-    const autoPk = !explicitPk && isId, combined = inKeyRow(c), alone = c.pk || autoPk;
+    const autoPk = keyedByName(c, explicitPk), combined = inKeyRow(c), alone = c.pk || autoPk;
     const isPk = alone || combined;
-    setPill(pill('pk'), isPk, { locked: autoPk || combined, title: combined ? 'In the primary key over several columns: change it on Combined'
+    setPill(pill('pk'), isPk, { locked: autoPk, title: combined ? 'In the primary key over several columns: untick to take it out'
       : autoPk ? 'Id is the primary key automatically' : 'Primary key' });
     // a primary key column in the table's colour, as in the diagram
     const hue = isPk ? tableHue(SELF) : null;
@@ -222,10 +263,12 @@ function refreshHints() {
     // a primary key is never NULL
     if (isPk) c.nullable = false;
     setPill(pill('nullable'), c.nullable, { gone: isPk, title: 'May be NULL' });
-    setPill(pill('unique'), c.unique, { title: 'UNIQUE' });
+    // a unique key or index being filled in on Combined, over it alone so far, shows on its pill: Combined's to change
+    const uniqueRow = growingRowOver(c, 'unique'), indexRow = growingRowOver(c, 'index');
+    setPill(pill('unique'), c.unique || uniqueRow, { locked: uniqueRow, title: uniqueRow ? 'A unique key on Combined is over it: change it there' : 'UNIQUE' });
     // an index of its own adds nothing to a key's
-    setPill(pill('indexed'), c.indexed, { locked: alone || c.unique, title: alone || c.unique
-      ? `Indexed already, as ${c.unique ? 'a unique column' : 'the primary key'}` : 'INDEX: an index over this column alone' });
+    setPill(pill('indexed'), c.indexed || indexRow, { locked: alone || c.unique || indexRow, title: indexRow ? 'An index on Combined is over it: change it there'
+      : alone || c.unique ? `Indexed already, as ${c.unique ? 'a unique column' : 'the primary key'}` : 'INDEX: an index over this column alone' });
     // auto_increment: only an integer column that is the primary key on its own; such an Id has it already
     const canAuto = (autoPk || (c.pk && pkCount === 1 && !key?.chips.length)) && INT_TYPES.has(typeParts(normType(c.type.trim() || 'int')).base);
     const implied = canAuto && isId;
@@ -233,11 +276,23 @@ function refreshHints() {
     setPill(pill('auto'), canAuto && (c.auto || implied), {
       locked: implied, gone: !canAuto, title: implied ? 'Id is numbered by the database automatically' : 'AUTO_INCREMENT',
     });
-    row.querySelector('.c-type').placeholder = isId || c.ref ? 'int' : 'vc';
+    row.querySelector('.c-type').placeholder = defaultFormType(c);
   }
-  const hint = $('#tdKeyHint');
-  hint.hidden = !key?.chips.length;
-  if (key) hint.textContent = `The primary key is over ${key.chips.map(ch => chipName(ch) || 'no name').join(', ')}: change it on Combined.`;
+  renderHints();
+}
+
+// The band above Save: on the Columns tab, what the Combined tab holds that the rows don't show, as the diagram's
+// footer writes it; Delete table armed, the foreign keys into the table, which go with it
+function renderHints() {
+  const onCols = dlg.tab === 'cols', key = keyRow(), names = r => r.chips.map(ch => chipName(ch) || 'no name').join(', ');
+  const others = dlg.rows.filter(r => r.kind !== 'pk' && r.chips.length).map(r => `${r.kind} (${names(r)})`);
+  const hints = [
+    [$('#tdKeyHint'), onCols && key?.chips.length ? `The primary key is over ${names(key)}: change it on Combined.` : ''],
+    [$('#tdCombinedHint'), onCols && others.length ? `Also on Combined: ${others.join(', ')}.` : ''],
+    [$('#tdDeleteNote'), $('#tdDelete').classList.contains('armed') ? keysIntoText(keysInto(dlg.tables, [dlg.orig])) : ''],
+  ];
+  for (const [el, text] of hints) { el.textContent = text; el.hidden = !text; }
+  $('#tdHints').hidden = hints.every(([, text]) => !text);
 }
 
 tdCols.addEventListener('input', e => {
@@ -261,13 +316,13 @@ tdCols.addEventListener('click', e => {
   switch (act) {
     case 'flag': {
       const on = b.getAttribute('aria-pressed') !== 'true', f = b.dataset.f;
-      if (f === 'pk') setColumnKey(cols[i], on);
+      if (f === 'pk') toggleColumnKey(cols[i]);
       else cols[i][f] = on;
       if (f === 'unique' && on) cols[i].indexed = false; // an index of its own adds nothing to a key's
       if (f === 'pk') renderCombined();
       return refreshHints();
     }
-    case 'del': dropCombinedColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; renderCombined(); break;
+    case 'del': dropCombinedColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; foldRows(true); renderCombined(); break;
     case 'unlink': cols[i].ref = cols[i].refCol = null; if (dlg.fk?.row === i) dlg.fk = null; break;
     case 'fk': return openFk(i);
   }
@@ -318,6 +373,7 @@ function addColumn() {
   dlg.cols.push(blankCol());
   renderCols();
   tdCols.querySelector(`.col-row[data-i="${dlg.cols.length - 1}"] .c-name`).focus();
+  $('#tdAdd').scrollIntoView({ block: 'nearest' }); // the focus shows the row alone: Add, under it, too
 }
 $('#tdAdd').onclick = addColumn;
 
@@ -332,8 +388,8 @@ function showTab(tab) {
   }
   $('#tdColsPane').hidden = tab !== 'cols';
   $('#tdCombinedPane').hidden = tab !== 'combined';
-  if (tab === 'combined') renderCombined(); // the columns' names as typed
-  else refreshHints(); // the pills as the rows say
+  if (tab === 'combined') { renderCombined(); renderHints(); } // the columns' names as typed
+  else { foldRows(true); refreshHints(); } // the pills as the rows say
 }
 for (const b of dlgEl.querySelectorAll('.dlg-tabs [data-tab]')) b.onclick = () => { if (dlg.fk) closeFk(); showTab(b.dataset.tab); };
 // ← → between the tabs, as a tab list does
@@ -355,21 +411,37 @@ const inKeyRow = c => !!keyRow()?.chips.some(ch => ch.col === c);
 // Whether the dialog writes a primary key: a named column ticked PK, or a PK row over a column. Then no Id is the key
 // by its name.
 const writesKey = () => dlg.cols.some(c => c.pk && c.name.trim()) || !!keyRow()?.chips.length;
-// The columns that are the key alone, but `except`: those ticked PK, else, while no PK row is over a column, an Id by
-// its name
+// Whether the column is the key without pk written: named Id, or renamed here from the Id that was
+const keyedByName = (c, explicitPk) => !explicitPk && (isIdName(c.name.trim()) || (!!c.origName && isIdName(c.origName)));
+// The columns that are the key alone, but `except`: those ticked PK, else, while no PK row is over a column, those that
+// are the key by their names
 function keyAlone(except) {
   const ticked = dlg.cols.filter(c => c !== except && c.pk && c.name.trim());
   if (ticked.length || keyRow()?.chips.length) return ticked;
-  return dlg.cols.filter(c => c !== except && isIdName(c.name.trim()));
+  return dlg.cols.filter(c => c !== except && keyedByName(c, false));
 }
-// The columns added to the end of the row, those not in it yet
-const addChips = (row, cols) => { for (const col of cols) if (!row.chips.some(ch => ch.col === col)) row.chips.push({ col }); };
+// The column the table is keyed by: the PK row's where it is over one, else the one that is the key alone; null for a key
+// over several columns, or none
+function ownKeyColumn() {
+  const key = keyRow();
+  if (key?.chips.length) return key.chips.length === 1 ? chipName(key.chips[0]) : null;
+  const alone = keyAlone(null);
+  return alone.length === 1 ? alone[0].name.trim() : null;
+}
+// The columns added to the end of the row, those not in it yet. Over several, it is filled in.
+function addChips(row, cols) {
+  for (const col of cols) if (!row.chips.some(ch => ch.col === col)) row.chips.push({ col });
+  if (row.chips.length > 1) row.growing = false;
+}
+// Whether a row of `kind` being filled in is over just the column c
+const growingRowOver = (c, kind) => dlg.rows.some(r => r.kind === kind && r.growing && r.chips.length === 1 && r.chips[0].col === c);
 
-// Each row over one named column of the table, that column's PK, UNIQUE or INDEX
-function foldRows() {
+// Each row over one named column of the table, that column's PK, UNIQUE or INDEX. `live`, while the dialog is open: but
+// a row still being filled in, and one over a column whose name is being typed again.
+function foldRows(live = false) {
   dlg.rows = dlg.rows.filter(r => {
     const named = r.chips.filter(chipName);
-    if (named.length !== 1 || !named[0].col) return true;
+    if (named.length !== 1 || !named[0].col || (live && (r.growing || r.chips.length !== 1))) return true;
     named[0].col[{ pk: 'pk', unique: 'unique', index: 'indexed' }[r.kind]] = true;
     return false;
   });
@@ -389,19 +461,36 @@ function setColumnKey(c, on) {
   for (const o of [...others, c]) o.pk = false;
 }
 
+// PK clicked on a column: in the PK row, it leaves it; else it is ticked or not (setColumnKey). A PK row left over one
+// column is that column's PK, as the Columns tab shows.
+function toggleColumnKey(c) {
+  const key = keyRow(), at = key ? key.chips.findIndex(ch => ch.col === c) : -1;
+  if (at >= 0) key.chips.splice(at, 1);
+  else setColumnKey(c, !c.pk);
+  foldRows(true);
+}
+
 // A row's kind picked. Made PK (while no other row is), the columns that were the key alone join it first, in order.
+// Made FK, it is a foreign key instead, its key to pick first.
 function setRowKind(row, kind) {
   if (kind === row.kind || (kind === 'pk' && keyRow())) return;
+  if (kind === 'fk') {
+    dlg.rows.splice(dlg.rows.indexOf(row), 1);
+    dlg.fks.push(blankFk());
+    return;
+  }
   if (kind === 'pk') {
     const alone = keyAlone(null);
     for (const c of alone) c.pk = false;
     row.chips.unshift(...alone.filter(c => !row.chips.some(ch => ch.col === c)).map(col => ({ col })));
+    if (row.chips.length > 1) row.growing = false;
   }
   row.kind = kind;
 }
 
 // A column removed: a unique key over it goes, as dropping the column takes it along; the primary key and an index
-// lose it, and keep their other columns
+// lose it, and keep their other columns. A foreign key's column it was is to pick again; a foreign key to a key of this
+// table over it goes whole, and says so: half a key can't be pointed at.
 function dropCombinedColumn(c) {
   dlg.rows = dlg.rows.filter(r => {
     const at = r.chips.findIndex(ch => ch.col === c);
@@ -410,16 +499,26 @@ function dropCombinedColumn(c) {
     r.chips.splice(at, 1);
     return true;
   });
+  for (const form of dlg.fks) form.cols = form.cols.map(o => o === c ? null : o);
+  dlg.fks = dlg.fks.filter(form => {
+    if (form.table !== SELF || !form.keyCols.some(ch => ch.col === c)) return true;
+    toast(`Removed the foreign key to ${fkLabel(form)} with ${c.name.trim()}: a foreign key needs every column of its key`);
+    return false;
+  });
 }
 
-// A row: its kind; its columns as chips in its order in a field as wide on every row, wrapping onto more lines, a + at
-// their end that lists the others; ×. The table has one primary key: PK is offered to the row that is it, or to any
-// while none is.
+// The kind list of a row or a foreign key: the table has one primary key, so PK is offered to the row that is it, or to
+// any while none is
+function kindList(kind, taken) {
+  return `<select class="cb-kind" aria-label="Kind" title="${taken ? 'The table has a primary key already' : 'Primary key, unique key, index or foreign key'}">` +
+    KINDS.map(([k, label]) => `<option value="${k}"${k === kind ? ' selected' : ''}${k === 'pk' && taken ? ' disabled' : ''}>${label}</option>`).join('') + '</select>';
+}
+
+// The rows, then the foreign keys. A row: its kind; its columns as chips in its order in a field as wide on every row,
+// wrapping onto more lines, a + at their end that lists the others; ×.
 function renderCombined() {
-  const key = keyRow();
+  const key = keyRow(), targets = dlg.fks.length ? fkTargets() : [];
   tdCombined.innerHTML = dlg.rows.map((r, i) => {
-    const taken = key && key !== r;
-    const kinds = KINDS.map(([k, label]) => `<option value="${k}"${k === r.kind ? ' selected' : ''}${k === 'pk' && taken ? ' disabled' : ''}>${label}</option>`).join('');
     const chips = r.chips.map((ch, k) => {
       const name = chipName(ch), lost = !ch.col || !name; // a name no column has, or a column with no name to save under
       return `<span class="cb-chip${lost ? ' lost' : ''}" title="${lost ? (ch.col ? 'This column has no name yet' : `${esc(name)} is no column of this table`) : ''}">` +
@@ -428,17 +527,57 @@ function renderCombined() {
     const choices = dlg.cols.map((c, j) => [c, j]).filter(([c]) => c.name.trim() && !r.chips.some(ch => ch.col === c));
     const what = { pk: 'primary key', unique: 'unique key', index: 'index' }[r.kind];
     return `<div class="cb-row" data-r="${i}">
-      <select class="cb-kind" aria-label="Kind" title="${taken ? 'The table has a primary key: another row is PK' : 'Primary key, unique key or index'}">${kinds}</select>
+      ${kindList(r.kind, key && key !== r)}
       <div class="cb-cols">${chips}<select class="cb-add" aria-label="Add a column" title="Add a column"${choices.length ? '' : ' disabled'}>` +
         `<option value="" hidden selected>+</option>${choices.map(([c, j]) => `<option value="${j}">${esc(c.name.trim())}</option>`).join('')}</select></div>
       <button class="icon-x" data-act="cb-del" title="Remove this ${what}" aria-label="Remove this ${what}">×</button>
     </div>`;
-  }).join('') || '<div class="cb-empty">Nothing over several columns yet. A primary key, unique key or index over two or more columns goes here; one over a single column is that column\'s PK, UNIQUE or INDEX on the Columns tab.</div>';
+  }).join('') + dlg.fks.map((form, f) => fkMarkup(form, f, targets, !!key)).join('') ||
+    '<div class="cb-empty">Nothing over several columns yet. A primary key, unique key, index or foreign key over two or more columns goes here; one over a single column is set on the Columns tab.</div>';
+}
+
+// A foreign key: FK, → the key it points at, from `targets` (fkTargets), ×; under it a line for each column of that key,
+// as the foreign key points: the list of this table's columns to pick the one that points at it, → the key column's
+// name; then, while none is picked, that one is still to pick
+function fkMarkup(form, f, targets, pkTaken) {
+  const at = targets.findIndex(t => sameTarget(form, t)), hue = fkHue(form);
+  // a key no longer offered (its table renamed, its key changed) shows as the foreign key has it
+  const shown = at < 0 && form.table != null ? fkLabel(form) : 'Points at…';
+  const target = `<select class="fk-pick fk-target${at < 0 ? ' unpicked' : ''}" aria-label="The key it points at"` +
+    (targets.length ? '' : ` disabled title="No table has a key over several columns to point at. ${ONE_COLUMN_KEYS}."`) + '>' +
+    `<option value="" hidden${at < 0 ? ' selected' : ''}>${esc(shown)}</option>` +
+    targets.map((t, j) => `<option value="${j}"${j === at ? ' selected' : ''}>${esc(fkLabel(t))}</option>`).join('') +
+    `<option disabled>${ONE_COLUMN_KEYS}</option></select>`;
+  const lines = form.keyCols.map((ch, k) => {
+    const c = form.cols[k], name = chipName(ch);
+    const choices = dlg.cols.map((o, j) => {
+      if (!o.name.trim()) return '';
+      const other = fkElsewhere(form, o);
+      return `<option value="${j}"${o === c ? ' selected' : ''}${other ? ' disabled' : ''}>${esc(o.name.trim())}${other ? ` · points at ${esc(fkLabel(other))} already` : ''}</option>`;
+    }).join('');
+    return `<div class="fk-line" data-k="${k}">
+      <select class="fk-pick fk-col${c ? '' : ' unpicked'}" aria-label="The column that points at ${esc(name)}"><option value="" hidden${c ? '' : ' selected'}>Pick a column</option>${choices}</select>
+      <span class="fk-arrow">→</span><span${keyed('fk-keycol', hue)}>${esc(name)}</span>
+      <span class="fk-note">${c ? '' : `Pick a column for ${esc(name)}`}</span>
+    </div>`;
+  }).join('');
+  return `<div class="fk-form" data-f="${f}">
+    <div class="fk-head">${kindList('fk', pkTaken)}<span class="fk-arrow">→</span>${target}<span></span>
+      <button class="icon-x" data-act="cb-fk-del" title="Remove this foreign key" aria-label="Remove this foreign key">×</button></div>${lines}
+  </div>`;
 }
 
 tdCombined.addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
   if (!b) return;
+  if (b.dataset.act === 'cb-fk-del') {
+    const f = +b.closest('.fk-form').dataset.f;
+    dlg.fks.splice(f, 1); // its columns keep the types they have
+    renderCombined();
+    renderCols();
+    (tdCombined.querySelector(`.fk-form[data-f="${Math.min(f, dlg.fks.length - 1)}"] [data-act="cb-fk-del"]`) ?? $('#tdAddCombined')).focus();
+    return;
+  }
   const i = +b.closest('.cb-row').dataset.r;
   if (b.dataset.act === 'cb-chip') dlg.rows[i].chips.splice(+b.dataset.k, 1);
   else if (b.dataset.act === 'cb-del') dlg.rows.splice(i, 1);
@@ -448,20 +587,143 @@ tdCombined.addEventListener('click', e => {
   ((b.dataset.act === 'cb-chip' && row?.querySelector('.cb-add:not(:disabled)')) || row?.querySelector('[data-act="cb-del"]'))?.focus();
 });
 tdCombined.addEventListener('change', e => {
-  const sel = e.target, i = +sel.closest('.cb-row')?.dataset.r;
-  if (sel.classList.contains('cb-kind')) setRowKind(dlg.rows[i], sel.value);
+  const sel = e.target, form = sel.closest('.fk-form');
+  if (form) return fkChange(sel, +form.dataset.f);
+  const i = +sel.closest('.cb-row')?.dataset.r, kind = sel.classList.contains('cb-kind');
+  if (kind) setRowKind(dlg.rows[i], sel.value);
   else if (sel.classList.contains('cb-add') && sel.value !== '') addChips(dlg.rows[i], [dlg.cols[+sel.value]]);
   else return;
   renderCombined();
-  tdCombined.querySelector(`.cb-row[data-r="${i}"] .${sel.classList.contains('cb-kind') ? 'cb-kind' : 'cb-add'}`)?.focus();
+  // made FK, the foreign key it is now has its key picked first
+  const fk = kind && sel.value === 'fk' && tdCombined.querySelector(`.fk-form[data-f="${dlg.fks.length - 1}"]`);
+  (fk ? fk.querySelector('.fk-target:not(:disabled)') ?? fk.querySelector('.cb-kind')
+    : tdCombined.querySelector(`.cb-row[data-r="${i}"] .${kind ? 'cb-kind' : 'cb-add'}`))?.focus();
 });
 function addCombined() {
   showTab('combined');
-  dlg.rows.push({ kind: 'index', chips: [], comment: '' });
+  dlg.rows.push({ kind: 'index', chips: [], comment: '', growing: true });
   renderCombined();
   tdCombined.querySelector(`.cb-row[data-r="${dlg.rows.length - 1}"] .cb-kind`)?.focus();
+  $('#tdAddCombined').scrollIntoView({ block: 'nearest' });
 }
 $('#tdAddCombined').onclick = addCombined;
+
+// ─── Foreign keys over several columns, on Combined ──────────────────────────
+
+const blankFk = () => ({ table: null, keyCols: [], cols: [], onDelete: null, onUpdate: null });
+// The foreign key over several columns a column is one of, and the place of its key column there; null for none
+function formOf(c) {
+  for (const form of dlg.fks) { const k = form.cols.indexOf(c); if (k >= 0) return { form, k }; }
+  return null;
+}
+// Another foreign key over several columns than `form` that the column c is one of
+const fkElsewhere = (form, c) => dlg.fks.find(o => o !== form && o.cols.includes(c));
+// "Table (A, B)", or "this table (A, B)", of a foreign key or what it may point at
+const fkLabel = ({ table, keyCols }) => `${table === SELF ? 'this table' : table} (${keyCols.map(chipName).join(', ')})`;
+// Whether the foreign key points at `target`: the same table, the same columns in order (SELF has no name's case)
+const sameTarget = (form, target) => lc(form.table ?? '') === lc(target.table) && form.keyCols.length === target.keyCols.length &&
+  form.keyCols.every((ch, k) => lc(chipName(ch)) === lc(chipName(target.keyCols[k])));
+// The colour of the key it points at, as the diagram has it
+function fkHue(form) {
+  const t = tableOf(form.table), names = form.keyCols.map(ch => lc(chipName(ch)));
+  return (t && keyGroups(t).find(k => k.cols.length === names.length && k.cols.every((c, i) => lc(c.name) === names[i]))?.hue) ?? null;
+}
+
+// The keys over several columns a foreign key may point at, as the text pairs arrows with them: each other table's
+// primary key, then its unique keys; then this table's, as its PK and UNIQUE rows have them. [{ table, keyCols }]
+function fkTargets() {
+  const out = [], named = cols => cols.map(c => ({ written: c.name }));
+  for (const t of dlg.tables) {
+    if (t.name === dlg.orig) continue;
+    if (t.pkCols.length > 1) out.push({ table: t.name, keyCols: named(t.pkCols) });
+    for (const u of t.multiUniques) out.push({ table: t.name, keyCols: named(u.cols) });
+  }
+  for (const r of dlg.rows) if ((r.kind === 'pk' || r.kind === 'unique') && r.chips.length > 1) out.push({ table: SELF, keyCols: r.chips });
+  return out;
+}
+
+// The foreign key points at `target`, a column to pick for each of its key's: one picked for a key column of the same
+// name stays; else the column of that name is picked, unless it points somewhere already, by a reference of its own or
+// in another foreign key. The columns picked take their key columns' types.
+function setFkTarget(form, target) {
+  const was = new Map(form.keyCols.map((ch, k) => [lc(chipName(ch)), form.cols[k]]));
+  form.table = target.table;
+  form.keyCols = target.keyCols.map(ch => ({ ...ch }));
+  form.cols = [];
+  for (const ch of form.keyCols) {
+    const name = lc(chipName(ch)), kept = was.get(name);
+    form.cols.push(kept && !form.cols.includes(kept) ? kept
+      : dlg.cols.find(c => lc(c.name.trim()) === name && !c.ref && !form.cols.includes(c) && !fkElsewhere(form, c)) ?? null);
+  }
+  fitFkTypes(form);
+}
+
+// The column c points at the key column at place k, of its type, and at no other: its own reference, or its place for
+// another key column, goes
+function pickFkCol(form, k, c) {
+  form.cols = form.cols.map(o => o === c ? null : o);
+  form.cols[k] = c;
+  c.ref = c.refCol = null;
+  fitFkTypes(form);
+}
+
+// Each column of the foreign key takes the type of the key column it points at, where it has another, written or not
+function fitFkTypes(form) {
+  form.cols.forEach((c, k) => {
+    const type = c && refType(form.table, chipName(form.keyCols[k]), 0);
+    if (type && normType(type) !== normType(c.type.trim() || defaultFormType(c))) c.type = type;
+  });
+}
+
+// A pick from a foreign key's lists: its kind (PK, UNIQUE or INDEX: a row of that kind over its columns picked, in its
+// key's order), its key, or the column for one of its key's
+function fkChange(sel, f) {
+  const form = dlg.fks[f];
+  let focus;
+  if (sel.classList.contains('cb-kind')) {
+    dlg.fks.splice(f, 1);
+    const row = { kind: 'index', chips: [], comment: '', growing: true };
+    dlg.rows.push(row);
+    addChips(row, form.cols.filter(Boolean));
+    setRowKind(row, sel.value);
+    focus = `.cb-row[data-r="${dlg.rows.length - 1}"] .cb-kind`;
+  } else if (sel.classList.contains('fk-target')) {
+    setFkTarget(form, fkTargets()[+sel.value]);
+    focus = form.cols.includes(null) ? `.fk-form[data-f="${f}"] .fk-col.unpicked` : `.fk-form[data-f="${f}"] .fk-target`;
+  } else {
+    const k = +sel.closest('.fk-line').dataset.k;
+    pickFkCol(form, k, dlg.cols[+sel.value]);
+    focus = `.fk-form[data-f="${f}"] .fk-line[data-k="${k}"] .fk-col`;
+  }
+  renderCombined();
+  renderCols(); // the columns' references and types as they are now
+  tdCombined.querySelector(focus)?.focus();
+}
+
+// A pick in the chooser of a key over several columns (target), or of its column keyCol: the column i is one of the
+// foreign key that points at that key, the one there or a new one: for keyCol, else for the key column of its own name,
+// else for the first still to pick. The Combined tab shows, the one place to change it.
+function pointWithForeignKey(i, target, keyCol) {
+  const c = dlg.cols[i];
+  let form = dlg.fks.find(f => sameTarget(f, target));
+  if (!form) {
+    dlg.fks.push(form = blankFk());
+    setFkTarget(form, target);
+  }
+  const names = form.keyCols.map(ch => lc(chipName(ch)));
+  let k = names.indexOf(lc(keyCol ?? c.name.trim()));
+  if (k < 0) k = Math.max(0, form.cols.findIndex(o => !o || o === c));
+  if (!c.name.trim()) { // named after what it points to
+    const n = (target.table === SELF ? 'Parent' : target.table) + chipName(form.keyCols[k]);
+    if (!dlg.cols.some(o => lc(o.name) === lc(n))) c.name = n;
+  }
+  pickFkCol(form, k, c);
+  dlg.fk = null;
+  renderCols();
+  showTab('combined');
+  const at = tdCombined.querySelector(`.fk-form[data-f="${dlg.fks.indexOf(form)}"]`);
+  (at.querySelector('.fk-col.unpicked') ?? at.querySelector('.fk-target')).focus();
+}
 
 // ─── Foreign-key chooser: table list, then primary key or a specific column ──
 
@@ -471,6 +733,7 @@ function openFk(i) {
   dlg.fk = { row: i, table: c.ref, usePk: !c.refCol, col: c.refCol, filter: '' };
   renderCols();
   $('#fkFilter').focus();
+  tdCols.querySelector('.fk-panel').scrollIntoView({ block: 'nearest' }); // its OK too
 }
 
 function closeFk() {
@@ -505,13 +768,16 @@ function fkState() {
   const filter = lc(fk.filter.trim());
   const shown = tables.filter(t => !filter || lc(t.name).includes(filter));
   const table = tables.find(t => t.key === fk.table || (fk.table !== SELF && lc(t.name) === lc(fk.table ?? '')));
-  const usePk = !!table?.pk && fk.usePk;
+  const usePk = !!table?.pkCols.length && fk.usePk;
   const col = usePk ? table.pk : table?.cols.find(c => lc(c.name) === lc(fk.col ?? ''))?.name ?? null;
-  return { tables, shown, table, usePk, col };
+  // a primary key over several columns, or a column of one: a foreign key over several columns points at it, on Combined
+  const several = table?.pkCols.length > 1 && (usePk || table.pkCols.includes(col))
+    ? { table: table.key, keyCols: table.self ? keyRow().chips : table.pkCols.map(n => ({ written: n })) } : null;
+  return { tables, shown, table, usePk, col, several, ok: !!(col || several) };
 }
 
 function renderFkPanel() {
-  const fk = dlg.fk, { shown, table, usePk, col } = fkState();
+  const fk = dlg.fk, { shown, table, usePk, col, several, ok } = fkState();
   $('#fkTables').innerHTML = shown.length
     ? shown.map(t => `<button class="fk-item${t === table ? ' on' : ''}" data-act="fk-table" data-key="${esc(t.key === SELF ? '' : t.key)}" role="option" aria-selected="${t === table}">` +
         `<span${keyed('', tableHue(t.key))}>${esc(t.name)}</span>${t.self ? ' <em>(this table)</em>' : ''}</button>`).join('')
@@ -519,7 +785,7 @@ function renderFkPanel() {
 
   const pkBox = $('#fkUsePk');
   pkBox.checked = usePk;
-  pkBox.disabled = !table?.pk;
+  pkBox.disabled = !table?.pkCols.length;
   $('#fkPkLabel').textContent = table ? `Primary key (${table.pkNote})` : 'Primary key';
 
   const colsEl = $('#fkCols');
@@ -532,11 +798,11 @@ function renderFkPanel() {
       `${esc(c.name)}:${esc(c.type)}${tags}</button>`;
   }).join('') || '<div class="fk-empty">This table has no columns yet</div>';
 
-  const preview = $('#fkPreview'), hue = table && col ? refHue(table.key, usePk ? null : col) : null;
-  preview.textContent = table && col ? `→ ${table.name}.${col}` : '';
+  const preview = $('#fkPreview'), hue = several ? tableHue(table.key) : col ? refHue(table.key, usePk ? null : col) : null;
+  preview.textContent = several ? `→ ${fkLabel(several)}` : col ? `→ ${table.name}.${col}` : '';
   preview.classList.toggle('h-hue', hue != null);
   preview.style.setProperty('--h', hue ?? '');
-  $('#fkOk').disabled = !(table && col);
+  $('#fkOk').disabled = !ok;
   $('#fkTables .fk-item.on')?.scrollIntoView({ block: 'nearest' });
 }
 
@@ -555,9 +821,11 @@ function fkPanelClick(b) {
   }
 }
 
+// A key over several columns goes to Combined (pointWithForeignKey)
 function applyFk() {
-  const { table, usePk, col } = fkState();
-  if (!table || !col) return;
+  const { table, usePk, col, several, ok } = fkState();
+  if (!ok) return;
+  if (several) return pointWithForeignKey(dlg.fk.row, several, usePk ? null : col);
   const c = dlg.cols[dlg.fk.row];
   c.ref = table.key;
   c.refCol = usePk ? null : col;
@@ -570,7 +838,7 @@ function applyFk() {
 
 // Arrow keys move through the table list; Enter picks / confirms; Esc closes the chooser
 function fkKeydown(e) {
-  const fk = dlg.fk, { shown, table, col } = fkState();
+  const fk = dlg.fk, { shown, table, ok } = fkState();
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     if (!shown.length) return;
@@ -581,7 +849,7 @@ function fkKeydown(e) {
   } else if (e.key === 'Enter') {
     e.preventDefault();
     if (e.target.tagName === 'BUTTON') { e.target.click(); return; }
-    if (table && col) applyFk();
+    if (ok) applyFk();
     else if (!table && shown.length) { fk.table = shown[0].key; fk.usePk = true; renderFkPanel(); }
   } else if (e.key === 'Escape') {
     e.preventDefault();
@@ -597,12 +865,13 @@ function fail(input, msg) {
   clearError();
   input.classList.add('invalid');
   input.focus();
-  const at = input.closest('.col-row, .field');
+  const at = input.closest('.col-row, .field, .fk-line');
   const err = document.createElement('div');
   err.className = 'field-error';
   err.textContent = msg;
   err.style.paddingLeft = input.getBoundingClientRect().left - at.getBoundingClientRect().left + 'px';
   at.after(err);
+  err.scrollIntoView({ block: 'nearest' });
 }
 
 function clearError() {
@@ -622,17 +891,34 @@ function saveTable() {
   }
 
   foldRows(); // a row left over one column is that column's PK, UNIQUE or INDEX
+  const explicitPk = writesKey();
+  // A foreign key over several columns is its columns' arrows, each to its key column (the text makes them one again).
+  // One with a column still to pick isn't saved, nor is the table; one with no key picked is none.
+  for (const [f, form] of dlg.fks.entries()) {
+    const k = form.cols.indexOf(null);
+    if (k < 0) continue;
+    showTab('combined');
+    return fail(tdCombined.querySelector(`.fk-form[data-f="${f}"] .fk-line[data-k="${k}"] .fk-col`),
+      `Pick a column for ${chipName(form.keyCols[k])}, in the foreign key to ${fkLabel(form)}.`);
+  }
   const rows = [...tdCols.querySelectorAll('.col-row')];
   const seen = new Set(), cols = [];
   for (const [i, c] of dlg.cols.entries()) {
     const nameIn = rows[i].querySelector('.c-name'), typeIn = rows[i].querySelector('.c-type');
-    const cn = c.name.trim(), ct = c.type.trim();
-    if (!cn && !ct && !c.ref) continue; // empty row
+    const cn = c.name.trim(), ct = c.type.trim(), inFk = formOf(c);
+    if (!cn && !ct && !c.ref && !inFk) continue; // empty row
     if (!IDENT.test(cn)) return fail(nameIn, cn ? `"${cn}" is not a valid column name.` : 'This column needs a name.');
     if (seen.has(lc(cn))) return fail(nameIn, `There are two columns named ${cn}.`);
     if (/#|->/.test(ct)) return fail(typeIn, 'The type can\'t contain # or ->.');
     seen.add(lc(cn));
-    cols.push({ ...c, name: cn, type: ct });
+    // a type a reference gave, or an Id's int, that nothing gives it now: kept, written
+    const kept = !ct && !c.ref && !inFk && !isIdName(cn) && c.openedType !== 'vc' ? c.openedType : '';
+    cols.push({ ...c, name: cn, type: ct || kept, inFk });
+  }
+  const broken = dlg.orig && brokenForeignKey();
+  if (broken) {
+    const i = dlg.cols.indexOf(broken.col);
+    return fail(i < 0 ? tdName : rows[i].querySelector('.c-name'), broken.msg);
   }
 
   // Columns renamed in the dialog: references to them (here and in other tables) follow along
@@ -651,22 +937,18 @@ function saveTable() {
   // columns ticked PK that are one key together (only text written so, read as it was, can be) get a line too
   const pkLine = keyLines.pk.length > 0 || cols.filter(c => c.pk).length > 1;
   if (!keyLines.pk.length && pkLine) keyLines.pk.push(`  pk (${cols.filter(c => c.pk).map(c => c.name).join(', ')})`);
+  // what a column's -> points at, a column of this table by the name it is saved under
+  const refTo = c => {
+    if (c.inFk) return (c.inFk.form.table === SELF ? name : c.inFk.form.table) + '.' + chipName(c.inFk.form.keyCols[c.inFk.k]);
+    if (!c.ref) return null;
+    const self = toSelf(c), refCol = self && c.refCol ? renamed.get(lc(c.refCol)) ?? c.refCol : c.refCol;
+    return (self ? name : c.ref) + (refCol ? '.' + refCol : '');
+  };
   for (const c of cols) {
-    const parts = [c.name];
-    if (c.type) parts.push(c.type);
-    if (c.pk && !pkLine) parts.push('pk');
-    if (c.nullable) parts.push('null');
-    if (c.unique) parts.push('unique');
-    if (c.indexed) parts.push('index');
-    if (c.auto && !isIdName(c.name)) parts.push('auto_increment');
-    if (c.ref) {
-      const self = toSelf(c);
-      const refCol = self && c.refCol ? renamed.get(lc(c.refCol)) ?? c.refCol : c.refCol;
-      parts.push('-> ' + (self ? name : c.ref) + (refCol ? '.' + refCol : ''));
-    }
-    const opts = optsItems(c);
-    if (opts.length) parts.push(`[${opts.join(', ')}]`);
-    block.push('  ' + parts.join(' ') + (c.comment ? '  ' + c.comment : ''));
+    const actions = c.inFk && { onDelete: c.inFk.form.onDelete, onUpdate: c.inFk.form.onUpdate }; // one key does one thing
+    // an Id renamed stays the key: the new name doesn't make it one, so pk says so
+    const pk = !pkLine && (c.pk || (keyedByName(c, explicitPk) && !isIdName(c.name)));
+    block.push(columnLine({ ...c, ...actions, pk, ref: refTo(c) }) + (c.comment ? '  ' + c.comment : ''));
   }
   block.push(...keyLines.pk, ...keyLines.unique, ...keyLines.index);
 
@@ -704,11 +986,34 @@ function saveTable() {
   histCommit();
 }
 
+// Another table's foreign key to a key of this table that the dialog doesn't keep, as a refusal to save that says so:
+// { col: the first of the key's columns still here, msg }; null for none. Saved, it would point at no key: the other
+// table is changed first. Asked once the rows are folded.
+function brokenForeignKey() {
+  const t = dlg.tables.find(t => t.name === dlg.orig), key = keyRow();
+  // the primary key and the unique keys as saved
+  const keys = [key?.chips.length ? key.chips.map(ch => ch.col) : keyAlone(null),
+    ...dlg.rows.filter(r => r.kind === 'unique').map(r => r.chips.map(ch => ch.col)), ...dlg.cols.filter(c => c.unique).map(c => [c])];
+  for (const o of dlg.tables) {
+    if (o === t) continue;
+    for (const c of o.cols) {
+      if (c.target !== t || c.implicit || !leadsFk(c) || !pointsAtKey(c)) continue;
+      const { cols, targetCols } = fkCols(c);
+      const pointed = targetCols.map(k => dlg.cols.find(d => d.origName && d.name.trim() && lc(d.origName) === lc(k.name))).filter(Boolean);
+      if (pointed.length === targetCols.length && keys.some(kept => kept.length === pointed.length && pointed.every(d => kept.includes(d)))) continue;
+      return { col: pointed[0] ?? null, msg: `${o.name}'s foreign key (${cols.map(x => x.name).join(', ')}) points at ${t.name} ` +
+        `(${targetCols.map(x => x.name).join(', ')}): keep that key, or change ${o.name} first.` };
+    }
+  }
+  return null;
+}
+
 function deleteTable() {
   const btn = $('#tdDelete');
   if (!btn.classList.contains('armed')) {
     btn.classList.add('armed');
     btn.textContent = 'Click again to delete';
+    renderHints();
     return;
   }
   const name = dlg.orig;
@@ -723,12 +1028,19 @@ function disarmDelete() {
 
 // ─── Deleting and duplicating tables (the dialog, the keys for the selected tables) ──
 
-// Their lines go, from the bottom up so the line numbers of the others still hold; Undo in the toast
+// Their lines go, from the bottom up so the line numbers of the others still hold, and the foreign keys into them with
+// them: the columns stay, of the type they had. Undo in the toast, which says what went.
 function deleteTables(names) {
-  const doomed = textModel().tables.filter(t => names.includes(t.name)).sort((a, b) => b.line - a.line);
+  const { tables } = textModel();
+  const doomed = tables.filter(t => names.includes(t.name)).sort((a, b) => b.line - a.line);
   if (!doomed.length) return;
+  const gone = new Set(doomed.map(t => lc(t.name))), keys = keysInto(tables, names);
   histBegin(doomed.length > 1 ? 'delete tables' : 'delete table');
   const lines = state.text.split('\n');
+  for (const t of tables) {
+    if (gone.has(lc(t.name))) continue;
+    for (const c of t.cols) if (c.ref && gone.has(lc(c.ref))) lines[c.line - 1] = unlinkedLine(lines[c.line - 1], c);
+  }
   for (const t of doomed) {
     const [s, e] = blockRange(lines, t.line - 1);
     lines.splice(s, e - s + 1);
@@ -739,7 +1051,40 @@ function deleteTables(names) {
   setSelected([...selected].filter(n => !names.includes(n)));
   commitText(lines.join('\n'), null);
   histCommit();
-  toast(doomed.length > 1 ? `Deleted ${doomed.length} tables` : `Deleted ${doomed[0].name}`, 'Undo', histUndo);
+  const what = doomed.length > 1 ? `Deleted ${doomed.length} tables` : `Deleted ${doomed[0].name}`;
+  toast(what + (keys.length === 1 ? ` and the foreign key from ${keys[0]}` : keys.length === 2 ? ` and the foreign keys from ${keys[0]} and ${keys[1]}`
+    : keys.length ? ` and ${keys.length} foreign keys into ${doomed.length > 1 ? 'them' : 'it'}` : ''), 'Undo', histUndo);
+}
+
+// The foreign keys of the other tables that point into the tables `names`, which deleting those takes along:
+// "Course.TeacherId", one over several columns "Line (OrderNo, LineNo)"
+function keysInto(tables, names) {
+  const gone = new Set(names.map(lc)), keys = [];
+  for (const t of tables) {
+    if (gone.has(lc(t.name))) continue;
+    for (const c of t.cols) {
+      if (c.ref && gone.has(lc(c.ref)) && leadsFk(c)) keys.push(c.fkGroup ? `${t.name} (${c.fkGroup.cols.map(o => o.name).join(', ')})` : `${t.name}.${c.name}`);
+    }
+  }
+  return keys;
+}
+
+// What deleting a table says of keysInto, as Squill says it; '' for none
+function keysIntoText(keys) {
+  if (!keys.length) return '';
+  if (keys.length === 1) return `${keys[0]} points here; its foreign key goes too`;
+  const which = keys.length === 2 ? `${keys[0]} and ${keys[1]}` : `${keys[0]}, ${keys[1]} and ${keys.length - 2} more`;
+  return `${which} point here; their foreign keys go too`;
+}
+
+// A column's line without its -> and the [delete …] and [update …] that go with it, of the type it had where none was
+// written; the rest as written
+function unlinkedLine(line, c) {
+  const at = commentAt(line), code = at < 0 ? line : line.slice(0, at), bi = code.indexOf('[');
+  let head = (bi < 0 ? code : code.slice(0, bi)).replace(REF_RE, '').trimEnd();
+  if (!c.type) head = head.replace(/^\s*\S+/, m => m + ' ' + c.effType); // after its name
+  const opts = bi < 0 ? [] : splitOpts(code.slice(bi + 1).replace(/\]\s*$/, '')).filter(item => !/^(delete|update)\b/i.test(item));
+  return head + (opts.length ? ` [${opts.join(', ')}]` : '') + (at < 0 ? '' : '  ' + line.slice(at));
 }
 
 // A table a foreign key points to but that isn't there yet ({ table, col, type } of the problem):
