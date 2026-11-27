@@ -18,19 +18,21 @@ const KINDS = [['pk', 'PK'], ['unique', 'UNIQUE'], ['index', 'INDEX']];
 const dlgEl = $('#tableDlg'), tdName = $('#tdName'), tdCols = $('#tdCols'), tdCombined = $('#tdCombined');
 $('#typeList').innerHTML = TYPE_SUGGESTIONS.map(t => `<option value="${t}">`).join('');
 
-// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, pk, nullable, unique, indexed, auto, ref, refCol, comment }],
-//        rows: [{ kind, chips: [{ col } | { written }], comment }] }
+// dlg: { orig, at, nameComment, tables, fk, start, tab, cols: [{ name, origName, type, openedType, pk, nullable, unique, indexed, auto, ref, refCol, comment }],
+//        rows: [{ kind, chips: [{ col } | { written }], comment, growing }] }
 // dlg.fk: the open foreign-key chooser { row, table, usePk, col, filter }
 // dlg.start: the dialog as it opened (see snapshot), to tell whether closing loses anything
 // dlg.tab: the tab shown, 'cols' or 'combined'
 // cols[].pk: the key alone (written pk); a column of a key over several columns is a chip of the PK row instead
+// cols[].openedType: the type it had as opened where none was written (its reference's, an Id's, vc), '' for one added here
 // dlg.rows: the Combined tab's rows, keys and indexes over several columns: the primary key (kind 'pk', one row at most),
 // then unique keys and indexes, each over its columns in order, a chip each: one of dlg.cols (col), or a name that is no
 // column of the table, kept as written for the text to report. A row over one column is that column's PK, UNIQUE or INDEX
-// once the dialog opens or saves (foldRows), not while it is edited.
+// (foldRows): once the Columns tab shows, unless it is still being filled in (growing: added here and not yet over several
+// columns), and once the dialog opens or saves.
 let dlg = null;
 
-const blankCol = () => ({ name: '', origName: null, type: '', pk: false, nullable: false, unique: false, indexed: false, auto: false, ref: null, refCol: null, comment: '' });
+const blankCol = () => ({ name: '', origName: null, type: '', openedType: '', pk: false, nullable: false, unique: false, indexed: false, auto: false, ref: null, refCol: null, comment: '' });
 const inlineComment = line => { const i = commentAt(line ?? ''); return i >= 0 ? line.slice(i).trim() : ''; };
 const lc = s => s.toLowerCase();
 const keyed = (cls, h) => ` class="${cls}${h == null ? '' : ' h-hue'}"${h == null ? '' : ` style="--h:${h}"`}`; // an element in a key's colour
@@ -79,7 +81,7 @@ function openTableEditor(name, at = null, col = null) {
   dlg = { orig: t?.name ?? null, at, tables, fk: null, nameComment: t ? inlineComment(lines[t.line - 1]) : '' };
   dlg.cols = t
     ? t.cols.map(c => ({
-        name: c.name, origName: c.name, type: c.type ?? '', pk: false, nullable: c.nullable, unique: c.unique, indexed: false, auto: c.auto,
+        name: c.name, origName: c.name, type: c.type ?? '', openedType: c.type ? '' : c.effType, pk: false, nullable: c.nullable, unique: c.unique, indexed: false, auto: c.auto,
         ref: !c.ref ? null : c.target === t || (!c.target && lc(c.ref) === lc(t.name)) ? SELF : c.target?.name ?? c.ref,
         refCol: !c.ref ? null : !c.target ? c.refCol : pointsToPk(c) ? null : c.targetCol.name,
         onDelete: c.onDelete, onUpdate: c.onUpdate, default: c.default, // kept as they are: the dialog doesn't edit them
@@ -145,7 +147,7 @@ function targetTables() {
     key: SELF, name: selfName, self: true,
     cols: dlg.cols.filter(c => c.name.trim()).map(c => ({
       name: c.name.trim(),
-      type: c.type.trim() || (isIdName(c.name.trim()) || c.ref ? 'int' : 'vc'),
+      type: c.type.trim() || defaultFormType(c),
       isPk: c.pk || inKeyRow(c) || (!explicitPk && isIdName(c.name.trim())),
       unique: c.unique,
     })),
@@ -161,6 +163,26 @@ function targetTables() {
     t.pkNote = pks.length === 1 ? pks[0].name : pks.length ? 'several columns' : 'none';
   }
   return all.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+}
+
+// The type a column takes with none typed, as the text gives it: an Id an int, one with a reference the type of the
+// column it points to (int where there is none); else the type it had as opened, which a reference given up or an Id
+// renamed leaves it (Save writes it), or vc
+function defaultFormType(c, depth = 0) {
+  if (isIdName(c.name.trim())) return 'int';
+  if (c.ref) return (depth < 8 && refType(c.ref, c.refCol, depth)) || 'int';
+  return c.openedType || 'vc';
+}
+
+// The type of the column a foreign key to `key` (a table's name, or SELF) and its refCol points to: refCol, else the
+// table's one primary key column; null where there is none
+function refType(key, refCol, depth) {
+  if (key !== SELF) {
+    const t = tableOf(key), col = !t ? null : refCol ? t.cols.find(c => lc(c.name) === lc(refCol)) : t.pkCols.length === 1 ? t.pkCols[0] : null;
+    return col?.effType ?? null;
+  }
+  const name = refCol ?? ownKeyColumn(), col = name && dlg.cols.find(c => lc(c.name.trim()) === lc(name));
+  return col ? col.type.trim() || defaultFormType(col, depth + 1) : null;
 }
 
 function refLabel(c) {
@@ -211,7 +233,7 @@ function refreshHints() {
     const isId = isIdName(c.name.trim());
     const autoPk = !explicitPk && isId, combined = inKeyRow(c), alone = c.pk || autoPk;
     const isPk = alone || combined;
-    setPill(pill('pk'), isPk, { locked: autoPk || combined, title: combined ? 'In the primary key over several columns: change it on Combined'
+    setPill(pill('pk'), isPk, { locked: autoPk, title: combined ? 'In the primary key over several columns: untick to take it out'
       : autoPk ? 'Id is the primary key automatically' : 'Primary key' });
     // a primary key column in the table's colour, as in the diagram
     const hue = isPk ? tableHue(SELF) : null;
@@ -222,10 +244,12 @@ function refreshHints() {
     // a primary key is never NULL
     if (isPk) c.nullable = false;
     setPill(pill('nullable'), c.nullable, { gone: isPk, title: 'May be NULL' });
-    setPill(pill('unique'), c.unique, { title: 'UNIQUE' });
+    // a unique key or index being filled in on Combined, over it alone so far, shows on its pill: Combined's to change
+    const uniqueRow = growingRowOver(c, 'unique'), indexRow = growingRowOver(c, 'index');
+    setPill(pill('unique'), c.unique || uniqueRow, { locked: uniqueRow, title: uniqueRow ? 'A unique key on Combined is over it: change it there' : 'UNIQUE' });
     // an index of its own adds nothing to a key's
-    setPill(pill('indexed'), c.indexed, { locked: alone || c.unique, title: alone || c.unique
-      ? `Indexed already, as ${c.unique ? 'a unique column' : 'the primary key'}` : 'INDEX: an index over this column alone' });
+    setPill(pill('indexed'), c.indexed || indexRow, { locked: alone || c.unique || indexRow, title: indexRow ? 'An index on Combined is over it: change it there'
+      : alone || c.unique ? `Indexed already, as ${c.unique ? 'a unique column' : 'the primary key'}` : 'INDEX: an index over this column alone' });
     // auto_increment: only an integer column that is the primary key on its own; such an Id has it already
     const canAuto = (autoPk || (c.pk && pkCount === 1 && !key?.chips.length)) && INT_TYPES.has(typeParts(normType(c.type.trim() || 'int')).base);
     const implied = canAuto && isId;
@@ -233,7 +257,7 @@ function refreshHints() {
     setPill(pill('auto'), canAuto && (c.auto || implied), {
       locked: implied, gone: !canAuto, title: implied ? 'Id is numbered by the database automatically' : 'AUTO_INCREMENT',
     });
-    row.querySelector('.c-type').placeholder = isId || c.ref ? 'int' : 'vc';
+    row.querySelector('.c-type').placeholder = defaultFormType(c);
   }
   renderHints();
 }
@@ -272,13 +296,13 @@ tdCols.addEventListener('click', e => {
   switch (act) {
     case 'flag': {
       const on = b.getAttribute('aria-pressed') !== 'true', f = b.dataset.f;
-      if (f === 'pk') setColumnKey(cols[i], on);
+      if (f === 'pk') toggleColumnKey(cols[i]);
       else cols[i][f] = on;
       if (f === 'unique' && on) cols[i].indexed = false; // an index of its own adds nothing to a key's
       if (f === 'pk') renderCombined();
       return refreshHints();
     }
-    case 'del': dropCombinedColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; renderCombined(); break;
+    case 'del': dropCombinedColumn(cols[i]); cols.splice(i, 1); dlg.fk = null; foldRows(true); renderCombined(); break;
     case 'unlink': cols[i].ref = cols[i].refCol = null; if (dlg.fk?.row === i) dlg.fk = null; break;
     case 'fk': return openFk(i);
   }
@@ -345,7 +369,7 @@ function showTab(tab) {
   $('#tdColsPane').hidden = tab !== 'cols';
   $('#tdCombinedPane').hidden = tab !== 'combined';
   if (tab === 'combined') { renderCombined(); renderHints(); } // the columns' names as typed
-  else refreshHints(); // the pills as the rows say
+  else { foldRows(true); refreshHints(); } // the pills as the rows say
 }
 for (const b of dlgEl.querySelectorAll('.dlg-tabs [data-tab]')) b.onclick = () => { if (dlg.fk) closeFk(); showTab(b.dataset.tab); };
 // ← → between the tabs, as a tab list does
@@ -374,14 +398,28 @@ function keyAlone(except) {
   if (ticked.length || keyRow()?.chips.length) return ticked;
   return dlg.cols.filter(c => c !== except && isIdName(c.name.trim()));
 }
-// The columns added to the end of the row, those not in it yet
-const addChips = (row, cols) => { for (const col of cols) if (!row.chips.some(ch => ch.col === col)) row.chips.push({ col }); };
+// The column the table is keyed by: the PK row's where it is over one, else the one that is the key alone; null for a key
+// over several columns, or none
+function ownKeyColumn() {
+  const key = keyRow();
+  if (key?.chips.length) return key.chips.length === 1 ? chipName(key.chips[0]) : null;
+  const alone = keyAlone(null);
+  return alone.length === 1 ? alone[0].name.trim() : null;
+}
+// The columns added to the end of the row, those not in it yet. Over several, it is filled in.
+function addChips(row, cols) {
+  for (const col of cols) if (!row.chips.some(ch => ch.col === col)) row.chips.push({ col });
+  if (row.chips.length > 1) row.growing = false;
+}
+// Whether a row of `kind` being filled in is over just the column c
+const growingRowOver = (c, kind) => dlg.rows.some(r => r.kind === kind && r.growing && r.chips.length === 1 && r.chips[0].col === c);
 
-// Each row over one named column of the table, that column's PK, UNIQUE or INDEX
-function foldRows() {
+// Each row over one named column of the table, that column's PK, UNIQUE or INDEX. `live`, while the dialog is open: but
+// a row still being filled in, and one over a column whose name is being typed again.
+function foldRows(live = false) {
   dlg.rows = dlg.rows.filter(r => {
     const named = r.chips.filter(chipName);
-    if (named.length !== 1 || !named[0].col) return true;
+    if (named.length !== 1 || !named[0].col || (live && (r.growing || r.chips.length !== 1))) return true;
     named[0].col[{ pk: 'pk', unique: 'unique', index: 'indexed' }[r.kind]] = true;
     return false;
   });
@@ -401,6 +439,15 @@ function setColumnKey(c, on) {
   for (const o of [...others, c]) o.pk = false;
 }
 
+// PK clicked on a column: in the PK row, it leaves it; else it is ticked or not (setColumnKey). A PK row left over one
+// column is that column's PK, as the Columns tab shows.
+function toggleColumnKey(c) {
+  const key = keyRow(), at = key ? key.chips.findIndex(ch => ch.col === c) : -1;
+  if (at >= 0) key.chips.splice(at, 1);
+  else setColumnKey(c, !c.pk);
+  foldRows(true);
+}
+
 // A row's kind picked. Made PK (while no other row is), the columns that were the key alone join it first, in order.
 function setRowKind(row, kind) {
   if (kind === row.kind || (kind === 'pk' && keyRow())) return;
@@ -408,6 +455,7 @@ function setRowKind(row, kind) {
     const alone = keyAlone(null);
     for (const c of alone) c.pk = false;
     row.chips.unshift(...alone.filter(c => !row.chips.some(ch => ch.col === c)).map(col => ({ col })));
+    if (row.chips.length > 1) row.growing = false;
   }
   row.kind = kind;
 }
@@ -469,7 +517,7 @@ tdCombined.addEventListener('change', e => {
 });
 function addCombined() {
   showTab('combined');
-  dlg.rows.push({ kind: 'index', chips: [], comment: '' });
+  dlg.rows.push({ kind: 'index', chips: [], comment: '', growing: true });
   renderCombined();
   tdCombined.querySelector(`.cb-row[data-r="${dlg.rows.length - 1}"] .cb-kind`)?.focus();
   $('#tdAddCombined').scrollIntoView({ block: 'nearest' });
@@ -647,7 +695,9 @@ function saveTable() {
     if (seen.has(lc(cn))) return fail(nameIn, `There are two columns named ${cn}.`);
     if (/#|->/.test(ct)) return fail(typeIn, 'The type can\'t contain # or ->.');
     seen.add(lc(cn));
-    cols.push({ ...c, name: cn, type: ct });
+    // a type a reference gave, or an Id's int, that nothing gives it now: kept, written
+    const kept = !ct && !c.ref && !isIdName(cn) && c.openedType !== 'vc' ? c.openedType : '';
+    cols.push({ ...c, name: cn, type: ct || kept });
   }
 
   // Columns renamed in the dialog: references to them (here and in other tables) follow along
