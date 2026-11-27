@@ -1,7 +1,8 @@
 // Reads a schema in jaidb's Simple text (the syntax Squill uses: `-> Owner on delete cascade`,
 // `pk (A, B)` and `unique (A, B)` lines for keys of several columns) and prints, as JSON on stdout, for each engine jaidb
 // has: the SQL generate_schema_sql makes, what it says it left out (unmade), and the problems
-// parse_schema found, then those schema_engine_problems finds of the engine's. test/generator-compare.js builds and
+// parse_schema found, then those schema_engine_problems finds of the engine's, both for the server
+// sql_visualizer writes for (server_version). test/generator-compare.js builds and
 // runs it; to run it by hand:
 //
 //   jai test/jaidb-sql.jai -import_dir ~/repos -output_path /tmp/jaidb-sql
@@ -31,13 +32,14 @@ main :: () {
     first := true;
     for engine: enum_values_as_enum(db.engine_t) {
         schema := db.parse_schema(text, db.p_engine_name_case(engine));
-        statements, unmade := db.generate_schema_sql(*schema, engine);
+        version := server_version(engine);
+        statements, unmade := db.generate_schema_sql(*schema, engine, version);
         if !first  append(*out, ",");
         first = false;
         print_to_builder(*out, "\n  %: {\"name\": %, \"sql\": %, \"unmade\": [", json_string(tprint("%", engine)), json_string(db.ENGINES[engine].name), json_string(statements));
         for unmade { if it_index  append(*out, ", "); append(*out, json_string(it)); }
         append(*out, "], \"problems\": [");
-        engine_problems := db.schema_engine_problems(*schema, engine);
+        engine_problems := db.schema_engine_problems(*schema, engine, version);
         listed := 0;
         for problems: ([] db.schema_problem_t).[schema.problems, engine_problems]  for problems {
             if listed  append(*out, ", ");
@@ -48,6 +50,12 @@ main :: () {
     }
     append(*out, "\n}\n");
     write_string(builder_to_string(*out));
+}
+
+// The server's version sql_visualizer writes for: a current MySQL (it has JSON, and points no foreign key at what is
+// no key); any other engine's not known.
+server_version :: (engine: db.engine_t) -> string {
+    return ifx engine == .MYSQL then "9.0" else "";
 }
 
 // The text as a JSON string, quotes and all (temp).
