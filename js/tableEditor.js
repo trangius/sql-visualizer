@@ -976,8 +976,8 @@ function saveTable() {
     if (lines.length) lines.push('');
     at = lines.length + 1;
     lines.push(...block, '');
-    // double-click on the canvas: exactly there; otherwise the layout picks the best spot
-    if (dlg.at) pos[name] = { ...dlg.at };
+    // double-click on the canvas: there, or the free spot nearest; otherwise the layout picks the best spot
+    if (dlg.at) placeNewTable(name, dlg.at);
     else delete pos[name];
   }
   saveDoc();

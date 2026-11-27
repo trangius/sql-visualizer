@@ -26,8 +26,9 @@ module.exports = function load() {
     ${edges}
     ${marks}
     ${read('layout')}
-    return { state, canvas, pos, parseText, resolve, markShown, shownCols, measureTable, footLines, ensurePositions,
+    return { state, canvas, pos, parseText, resolve, markShown, shownCols, measureTable, footLines, ensurePositions, placeNewTable,
       arrangeAll, diagramEdges, routeEdges, simplify, bundles, arrowFold, placeLabels, edgeMarkup, layoutInput, layoutBoxes, layoutGroup, snapLayout,
-      dragSpot, rowY, EXAMPLES, AUTO, ROUTE, GRID };
+      dragSpot, rowY, EXAMPLES, AUTO, ROUTE, GRID,
+      get revealName() { return revealName; }, loaded: () => { prevNames = null; } }; // loaded: as right after loading a diagram
   `)();
 };

@@ -139,6 +139,27 @@ const footLines = t => [
 const atNames = f => f.group != null || f.index;
 const footLabelW = foot => Math.max(0, ...foot.map(f => textW(f.label + ' ', FONTS.flags)));
 const footTop = n => ROWS_TOP + Math.max(1, n) * ROW_H + 6;
+// A footer line widens its box up to this, or as wide as its rows make it; a longer one goes on after a comma on the
+// next line
+const FOOT_MAX_W = 380;
+// The lines `text` takes in a box `room` wide when it starts at x = `start`: each as long as fits, ending at a comma
+function footWrap(text, start, room) {
+  const lines = [];
+  let from = 0, cut = -1, at = 0; // the line so far starts at `from`; the last comma that fits ends at `cut`
+  for (;;) {
+    const next = text.indexOf(', ', at), end = next < 0 ? text.length : next + 1;
+    if (cut >= 0 && start + textW(text.slice(from, end), FONTS.type) + PAD_X > room) {
+      lines.push(text.slice(from, cut));
+      from = cut + 1;
+      cut = -1;
+      continue;
+    }
+    if (next < 0) break;
+    cut = end;
+    at = next + 2;
+  }
+  return [...lines, text.slice(from)];
+}
 
 // Data view: the box is a real table, column names across and a few sample rows below
 // (see sample.js). Instead of arrows, colours link the rows: each row of a referenced
@@ -190,10 +211,14 @@ function measureTable(t) {
   const rows = shownCols(t).map(c => rowInfo(c, t)), foot = footLines(t), lead = dotsLead(t, keyGroups(t)), labelW = footLabelW(foot);
   const w = Math.max(MIN_W, textW(t.name, FONTS.head) + 2 * PAD_X + 12, ...rows.map(r =>
     PAD_X + lead + BADGE_W + GAP + textW(r.name, r.bold ? FONTS.pk : FONTS.name) + 16 +
-    (r.flags ? textW(r.flags, FONTS.flags) + 6 : 0) + textW(r.type, FONTS.type) + PAD_X),
-    ...foot.map(f => (atNames(f) ? PAD_X + BADGE_W + GAP + lead : PAD_X) + labelW + textW(f.text, FONTS.type) + PAD_X));
-  const h = footTop(rows.length) + (foot.length ? foot.length * FOOT_H + 6 : 0);
-  return { w: Math.ceil(w / 10) * 10, h, rows };
+    (r.flags ? textW(r.flags, FONTS.flags) + 6 : 0) + textW(r.type, FONTS.type) + PAD_X));
+  // f.lines: the footer line's text as it wraps
+  const room = Math.max(w, FOOT_MAX_W), start = f => (atNames(f) ? PAD_X + BADGE_W + GAP + lead : PAD_X) + labelW;
+  for (const f of foot) f.lines = footWrap(f.text, start(f), room);
+  const wide = Math.max(w, ...foot.flatMap(f => f.lines.map(l => start(f) + textW(l, FONTS.type) + PAD_X)));
+  const lines = foot.reduce((n, f) => n + f.lines.length, 0);
+  const h = footTop(rows.length) + (lines ? lines * FOOT_H + 6 : 0);
+  return { w: Math.ceil(wide / 10) * 10, h, rows, foot };
 }
 const rowY = i => ROWS_TOP + i * ROW_H + ROW_H / 2;
 // The height in a box an arrow from or to these rows runs at: a row's centre line, or halfway across a foreign
@@ -213,6 +238,22 @@ function arrowRows(t, c) {
 // The newest auto-placed table "floats": until it is dragged or another table is added,
 // it moves to a better spot whenever its arrows change (e.g. while its FKs are being typed).
 let revealName = null;
+// A table just made at a spot on the canvas (placeNewTable)
+let newTable = null;
+// Each spot's box size at the last draw, by its pos entry: not saved, so a spot read from storage, put back by undo or
+// dragged anew has none until it is drawn. drawnLook: what those boxes were measured with (boxLook).
+const drawnSize = new WeakMap();
+let drawnLook = null;
+// What a box's size depends on besides its table: the toggles, and the fonts (one arriving late changes every width).
+// A box bigger than at the last draw with the same look grew by an edit.
+const boxLook = () => JSON.stringify([state.keysOnly, state.indexes, state.implicit, state.dataView, ...Object.values(FONTS).map(f => textW('M', f))]);
+
+// A table made at `at` on the canvas: once its box is measured it stands there, or, where it would cover a table, at
+// the free spot nearest
+function placeNewTable(name, at) {
+  pos[name] = { ...at };
+  newTable = name;
+}
 
 // Is a box (at least its middle) inside the visible canvas?
 function onScreen(p, d) {
@@ -223,14 +264,14 @@ function onScreen(p, d) {
 }
 
 function ensurePositions(tables, dims) {
-  const names = new Set(tables.map(t => t.name));
+  const names = new Set(tables.map(t => t.name)), look = boxLook();
   let changed = false;
   // A table that just appeared may have an old spot from an earlier table with the same
   // name. If that spot is off screen, forget it, so the table is placed where you look.
   // (prevNames is null right after loading or switching tabs: then every spot is kept.)
   if (prevNames) {
     const before = new Set(prevNames);
-    for (const t of tables) if (!before.has(t.name) && pos[t.name] && !onScreen(pos[t.name], dims.get(t))) delete pos[t.name];
+    for (const t of tables) if (!before.has(t.name) && t.name !== newTable && pos[t.name] && !onScreen(pos[t.name], dims.get(t))) delete pos[t.name];
   }
   if (tables.length && !tables.some(t => pos[t.name])) {
     arrangeAll(tables, dims);
@@ -242,6 +283,18 @@ function ensurePositions(tables, dims) {
       const old = prevNames?.[i];
       if (!pos[t.name] && old && !names.has(old) && pos[old]) { pos[t.name] = pos[old]; changed = true; }
     });
+    const others = t => tables.filter(o => o !== t && pos[o.name]).map(o => [o, { ...pos[o.name], ...dims.get(o) }]);
+    // A table made on the canvas, or grown by an edit into a table it was clear of, goes to the free spot nearest; the
+    // other stays put. Not in the Data view, where a box is as big as its sample rows, which arrive later and change
+    // with other tables (onSampleData spreads those out).
+    const same = look === drawnLook && !state.dataView;
+    for (const t of tables) {
+      const p = pos[t.name], d = dims.get(t), made = t.name === newTable, was = p && same && drawnSize.get(p);
+      if (!p || !made && !(was && (d.w > was.w || d.h > was.h))) continue;
+      const s = clearSpot({ x: p.x, y: p.y, w: d.w, h: d.h }, others(t).map(([, r]) => r), made ? null : was);
+      if (s) { pos[t.name] = { ...p, ...s }; changed = true; }
+      if (s || made) revealName = t.name;
+    }
     const fresh = tables.filter(t => !pos[t.name]);
     if (fresh.length > AUTO.NEW_BATCH) {
       for (const q of Object.values(pos)) delete q.float; // none of a block floats
@@ -256,14 +309,16 @@ function ensurePositions(tables, dims) {
       const sig = linkSignature(t, tables);
       if (p?.sig === sig) continue;
       if (!p) for (const q of Object.values(pos)) delete q.float; // only the newest one floats
-      const placed = new Map(tables.filter(o => o !== t && pos[o.name]).map(o => [o, { ...pos[o.name], ...dims.get(o) }]));
-      const s = bestSpot(t, placed, dims, edges ??= layoutEdges(tables), viewCenter());
+      const s = bestSpot(t, new Map(others(t)), dims, edges ??= layoutEdges(tables), viewCenter());
       pos[t.name] = { x: s.x, y: s.y, float: true, sig };
       revealName = t.name;
       changed = true;
     }
   }
   prevNames = [...names];
+  for (const t of tables) if (pos[t.name]) drawnSize.set(pos[t.name], { w: dims.get(t).w, h: dims.get(t).h });
+  drawnLook = look;
+  newTable = null;
   if (changed) saveDoc();
 }
 
@@ -1303,7 +1358,7 @@ function computeGeometry() {
   ensurePositions(tables, dims);
   const boxes = new Map(tables.map(t => {
     const d = dims.get(t);
-    return [t, { x: pos[t.name].x, y: pos[t.name].y, w: d.w, h: d.h, rows: d.rows, data: d.data }];
+    return [t, { x: pos[t.name].x, y: pos[t.name].y, w: d.w, h: d.h, rows: d.rows, foot: d.foot, data: d.data }];
   }));
   const edges = state.dataView ? [] : diagramEdges(tables, boxes);
   const held = drag?.kind === 'box' && drag.moved ? new Set(tables.filter(t => drag.start[t.name]).map(t => boxes.get(t))) : null;
@@ -1453,19 +1508,21 @@ function boxMarkup(t, b, interactive) {
     }
     s += '</g>';
   });
-  const foot = footLines(t), fy = footTop(b.rows.length);
+  const { foot } = b, fy = footTop(b.rows.length);
   if (foot.length) s += `<line class="sep" x1="0" y1="${fy + .5}" x2="${w}" y2="${fy + .5}"/>`;
   const labelW = footLabelW(foot);
-  foot.forEach((f, k) => {
+  let k = 0; // the footer's lines above this one
+  for (const f of foot) {
     const y = fy + 3 + (k + .5) * FOOT_H;
-    // hovering the line lights up its rows
+    // hovering the line (all of it, where it wraps) lights up its rows
     s += `<g class="keyline" data-cols="${esc(f.cols.map(n => t.name + '.' + n).join('\n'))}">`;
-    if (interactive) s += `<rect class="hit" x="1" y="${y - FOOT_H / 2}" width="${w - 2}" height="${FOOT_H}"/>`;
+    if (interactive) s += `<rect class="hit" x="1" y="${y - FOOT_H / 2}" width="${w - 2}" height="${f.lines.length * FOOT_H}"/>`;
     if (f.group != null) s += keyDot(groups[f.group], f.group, slots - 1, y);
     const lx = atNames(f) ? nx : PAD_X;
     s += `<text class="flags${f.index ? ' idx' : ''}"${f.hue != null ? ` style="fill:oklch(var(--key-l, .55) var(--key-c, .15) ${f.hue})"` : ''} x="${lx}" y="${y}">${f.label}</text>` +
-      `<text class="type" x="${lx + labelW}" y="${y}">${esc(f.text)}</text></g>`;
-  });
+      f.lines.map((l, i) => `<text class="type" x="${lx + labelW}" y="${y + i * FOOT_H}">${esc(l)}</text>`).join('') + '</g>';
+    k += f.lines.length;
+  }
   s += `<rect class="outline" x=".5" y=".5" width="${w - 1}" height="${h - 1}" rx="${r - .5}"/></g>`;
   return s;
 }
@@ -1651,12 +1708,13 @@ function viewCenter() {
   return { x: (r.width / 2 - view.tx) / view.s, y: (r.height / 2 - view.ty) / view.s };
 }
 
-// Pan just enough to show a table's box
+// Pan just enough to show a table's box, zoomed out first as far as it takes when the box is bigger than the view
 function reveal(name) {
   const t = model.tables.find(t => t.name === name), b = t && geometry.boxes.get(t);
   const r = svg.getBoundingClientRect();
   if (!b || !r.width) return;
-  const m = 30;
+  const m = 30, fits = Math.min((r.width - 2 * m) / b.w, (r.height - CARD_TOP - CARD_BOTTOM) / b.h);
+  if (fits < view.s) zoomTo(fits, (b.x + b.w / 2) * view.s + view.tx, (b.y + b.h / 2) * view.s + view.ty);
   const x0 = b.x * view.s + view.tx, y0 = b.y * view.s + view.ty;
   const x1 = x0 + b.w * view.s, y1 = y0 + b.h * view.s;
   if (x0 < m) view.tx += m - x0; else if (x1 > r.width - m) view.tx -= Math.min(x1 - (r.width - m), x0 - m);
