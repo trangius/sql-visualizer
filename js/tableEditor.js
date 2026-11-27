@@ -112,6 +112,7 @@ function openTableEditor(name, at = null, col = null) {
       cols, onDelete: g.cols[0].onDelete, onUpdate: g.cols[0].onUpdate };
   });
   foldRows();
+  $('#toast').hidden = true; // its Undo, over the backdrop, would change the text the dialog edits
   $('#tdTitle').textContent = t ? `Edit table ${t.name}` : 'New table';
   $('#tdDelete').hidden = !t;
   disarmDelete();
@@ -161,7 +162,7 @@ function targetTables() {
     cols: dlg.cols.filter(c => c.name.trim()).map(c => ({
       name: c.name.trim(),
       type: c.type.trim() || defaultFormType(c),
-      isPk: c.pk || inKeyRow(c) || (!explicitPk && isIdName(c.name.trim())),
+      isPk: c.pk || inKeyRow(c) || keyedByName(c, explicitPk),
       unique: c.unique,
     })),
   };
@@ -249,7 +250,7 @@ function refreshHints() {
     const c = dlg.cols[+row.dataset.i];
     const pill = f => row.querySelector(`.pill[data-f="${f}"]`);
     const isId = isIdName(c.name.trim());
-    const autoPk = !explicitPk && isId, combined = inKeyRow(c), alone = c.pk || autoPk;
+    const autoPk = keyedByName(c, explicitPk), combined = inKeyRow(c), alone = c.pk || autoPk;
     const isPk = alone || combined;
     setPill(pill('pk'), isPk, { locked: autoPk, title: combined ? 'In the primary key over several columns: untick to take it out'
       : autoPk ? 'Id is the primary key automatically' : 'Primary key' });
@@ -410,12 +411,14 @@ const inKeyRow = c => !!keyRow()?.chips.some(ch => ch.col === c);
 // Whether the dialog writes a primary key: a named column ticked PK, or a PK row over a column. Then no Id is the key
 // by its name.
 const writesKey = () => dlg.cols.some(c => c.pk && c.name.trim()) || !!keyRow()?.chips.length;
-// The columns that are the key alone, but `except`: those ticked PK, else, while no PK row is over a column, an Id by
-// its name
+// Whether the column is the key without pk written: named Id, or renamed here from the Id that was
+const keyedByName = (c, explicitPk) => !explicitPk && (isIdName(c.name.trim()) || (!!c.origName && isIdName(c.origName)));
+// The columns that are the key alone, but `except`: those ticked PK, else, while no PK row is over a column, those that
+// are the key by their names
 function keyAlone(except) {
   const ticked = dlg.cols.filter(c => c !== except && c.pk && c.name.trim());
   if (ticked.length || keyRow()?.chips.length) return ticked;
-  return dlg.cols.filter(c => c !== except && isIdName(c.name.trim()));
+  return dlg.cols.filter(c => c !== except && keyedByName(c, false));
 }
 // The column the table is keyed by: the PK row's where it is over one, else the one that is the key alone; null for a key
 // over several columns, or none
@@ -888,6 +891,7 @@ function saveTable() {
   }
 
   foldRows(); // a row left over one column is that column's PK, UNIQUE or INDEX
+  const explicitPk = writesKey();
   // A foreign key over several columns is its columns' arrows, each to its key column (the text makes them one again).
   // One with a column still to pick isn't saved, nor is the table; one with no key picked is none.
   for (const [f, form] of dlg.fks.entries()) {
@@ -942,7 +946,9 @@ function saveTable() {
   };
   for (const c of cols) {
     const actions = c.inFk && { onDelete: c.inFk.form.onDelete, onUpdate: c.inFk.form.onUpdate }; // one key does one thing
-    block.push(columnLine({ ...c, ...actions, pk: c.pk && !pkLine, ref: refTo(c) }) + (c.comment ? '  ' + c.comment : ''));
+    // an Id renamed stays the key: the new name doesn't make it one, so pk says so
+    const pk = !pkLine && (c.pk || (keyedByName(c, explicitPk) && !isIdName(c.name)));
+    block.push(columnLine({ ...c, ...actions, pk, ref: refTo(c) }) + (c.comment ? '  ' + c.comment : ''));
   }
   block.push(...keyLines.pk, ...keyLines.unique, ...keyLines.index);
 
