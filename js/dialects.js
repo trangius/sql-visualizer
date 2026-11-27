@@ -82,29 +82,33 @@ const quoter = (words, open, close = open, folds = false) => n =>
   IDENT.test(n) && !words.has(n.toUpperCase()) && !(folds && /[A-Z]/.test(n)) ? n : open + n.split(close).join(close + close) + close;
 const tableSQL = (D, n) => (D.schema ? D.q(D.schema) + '.' : '') + D.q(n);
 
-// Lengths in bytes, as the databases count a name's
+// Lengths in bytes, as PostgreSQL and Oracle count a name's
 const utf8Length = s => { let n = 0; for (const ch of s) { const p = ch.codePointAt(0); n += p < 0x80 ? 1 : p < 0x800 ? 2 : p < 0x10000 ? 3 : 4; } return n; };
 function clipUtf8(s, max) {
   let out = '', n = 0;
   for (const ch of s) { n += utf8Length(ch); if (n > max) break; out += ch; }
   return out;
 }
+// A name's length, and its first `n`, in what the database's limit (D.nameMax: { most, characters }) counts: characters
+// (MariaDB's, MySQL's and SQL Server's), else bytes
+const nameLength = (s, limit) => limit.characters ? [...s].length : utf8Length(s);
+const clipName = (s, n, limit) => limit.characters ? [...s].slice(0, n).join('') : clipUtf8(s, n);
 
 // A constraint's or an index's name: PK_table, UQ_table_column, FK_table_column, IX_table_column (over several columns
-// they all, with _ between), numbered from _2 and cut to `max` bytes
+// they all, with _ between), numbered from _2 and cut to the database's `limit`
 const NAME_PREFIXES = { unique: 'UQ', fk: 'FK', index: 'IX' };
-function givenName(kind, table, column, number, max) {
+function givenName(kind, table, column, number, limit) {
   const base = kind === 'pk' ? `PK_${table}` : `${NAME_PREFIXES[kind]}_${table}_${column}`, suffix = number ? '_' + (number + 1) : '';
-  return clipUtf8(base, max - utf8Length(suffix)) + suffix;
+  return clipName(base, limit.most - nameLength(suffix, limit), limit) + suffix;
 }
 // MariaDB's own: PRIMARY; a unique key, a foreign key and an index given their names
-const mariadbName = (kind, table, column, number, max) => kind === 'pk' ? 'PRIMARY' : givenName(kind, table, column, number, max);
-// PostgreSQL's own: table_column_fkey (table_pkey, table_column_key), the longer name cut first until it fits,
-// then numbered fkey1, fkey2…; an index given its name
-function postgresName(kind, table, column, number, max) {
-  if (kind === 'index') return givenName(kind, table, column, number, max);
+const mariadbName = (kind, table, column, number, limit) => kind === 'pk' ? 'PRIMARY' : givenName(kind, table, column, number, limit);
+// PostgreSQL's own: table_column_fkey (table_pkey, table_column_key), the longer name cut first until it fits in its
+// bytes, then numbered fkey1, fkey2…; an index given its name
+function postgresName(kind, table, column, number, limit) {
+  if (kind === 'index') return givenName(kind, table, column, number, limit);
   const label = { pk: 'pkey', unique: 'key', fk: 'fkey' }[kind] + (number || ''), second = kind === 'pk' ? '' : column;
-  const room = max - utf8Length(label) - 1 - (second ? 1 : 0);
+  const room = limit.most - utf8Length(label) - 1 - (second ? 1 : 0);
   let a = utf8Length(table), b = utf8Length(second);
   while (a + b > room) { if (a > b) a--; else b--; }
   return [clipUtf8(table, a), ...(second ? [clipUtf8(second, b)] : []), label].join('_');
@@ -122,11 +126,11 @@ function constraintNamer(D) {
     const key = name => { const k = (N.scope[kind] === 'table' ? table : '') + '\u0000' + name; return N.exact ? k : k.toLowerCase(); };
     let name;
     for (let n = 0; ; n++) {
-      name = N.name(kind, table, column, n, N.max);
+      name = N.name(kind, table, column, n, D.nameMax);
       if (kind === 'pk' && N.pk) break; // MariaDB's is PRIMARY in every table
       if (!taken.has(key(name))) { taken.add(key(name)); break; }
     }
-    const own = N.own.includes(kind) && name === N.name(kind, table, column, 0, N.max);
+    const own = N.own.includes(kind) && name === N.name(kind, table, column, 0, D.nameMax);
     return { name, sql: own ? '' : `CONSTRAINT ${D.q(name)} ` };
   };
 }
@@ -185,6 +189,13 @@ const links = tables => tables.flatMap(t => t.cols.filter(c => c.target && !c.im
 const foreignKeys = tables => links(tables).filter(({ c }) => leadsFk(c)); // the arrows of a group as one
 
 // ─── What the databases refuse ───────────────────────────────────────────────
+
+// A table's or a column's name longer than the database allows, in jaidb's words (name_length_problem), its first 20
+// characters shown; the names of keys and indexes, which the text doesn't say, are cut to fit
+const nameLengthProblems = (tables, D) => tables.flatMap(t => [[t.name, t.line], ...t.cols.map(c => [c.name, c.line])].flatMap(([name, line]) => {
+  const n = nameLength(name, D.nameMax), shown = [...name].slice(0, 20).join('');
+  return n > D.nameMax.most ? [problem(line, `${shown}${shown.length < name.length ? '…' : ''} is ${n} ${D.nameMax.characters ? 'characters' : 'bytes'}; ${D.name} allows ${D.nameMax.most}`)] : [];
+}));
 
 // A type's name, up to its size, its array's brackets or its next word: "int[]" → "int"
 const typeHead = t => t.match(/^[^( []*/)[0];
@@ -567,7 +578,8 @@ function oracleProblems(tables) {
 }
 
 // ─── The databases ───────────────────────────────────────────────────────────
-// dqIdent: "x" is a name, not a string. backslash: \ escapes in strings.
+// dqIdent: "x" is a name, not a string. backslash: \ escapes in strings. nameMax: the longest name it takes ({ most,
+// characters: or bytes }), a longer one refused (nameLengthProblems), one the script gives cut to fit.
 // The script (genSchema): q quotes a name, schema is the default one tables are named in, type(t) or
 // types/native/sizeLimits/varchar/signWords give a column's type (typeSQL), unkeyable, unprimary, primarySizeLimits,
 // keyBytes and keyPartBytes the types and sizes a key is over (keyable), pointsAtIndexes: a foreign key may point at a
@@ -587,19 +599,19 @@ function oracleProblems(tables) {
 
 const sqlStr = s => `'${s.replace(/'/g, "''")}'`;
 const upperBool = b => b ? 'TRUE' : 'FALSE';
-const givenNames = (max, scope, index) => ({ name: givenName, own: [], scope: { pk: scope, unique: scope, fk: scope, index }, max });
+const givenNames = (scope, index) => ({ name: givenName, own: [], scope: { pk: scope, unique: scope, fk: scope, index } });
 // What most of them have in common; each one says what differs
 const COMMON = {
-  maxName: 64, dqIdent: true, backslash: false, str: sqlStr, bool: upperBool, today: 'CURRENT_DATE',
+  dqIdent: true, backslash: false, str: sqlStr, bool: upperBool, today: 'CURRENT_DATE',
   noActions: ['no action'], enumCheck: true, dataStart: () => [], dataEnd: () => [],
 };
 const MARIADB = {
-  ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), dqIdent: false, backslash: true,
+  ...COMMON, name: 'MariaDB', q: quoter(MARIADB_RESERVED, '`'), nameMax: { most: 64, characters: true }, dqIdent: false, backslash: true,
   types: MARIADB_TYPES, native: MARIADB_NATIVE, sizeLimits: MARIADB_SIZE_LIMITS, varchar: 'VARCHAR', signWords: true,
   keyLengthsMayDiffer: true, keyTypeKinds: MARIADB_KEY_KINDS, keyTypesNeeded: 'of one type and sign, their sizes aside',
   unprimary: MARIADB_UNPRIMARY, primarySizeLimits: MARIADB_PRIMARY_SIZES, pointsAtIndexes: true,
   typeOffers: MARIADB_OFFERS, otherTypes: MARIADB_OTHER_TYPES,
-  names: { name: mariadbName, own: ['pk'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema', index: 'table' }, max: 64 },
+  names: { name: mariadbName, own: ['pk'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema', index: 'table' } },
   autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, uniqueApart: true, enumCheck: false,
   keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
   problems: mariadbProblems, str: s => sqlStr(s.replace(/\\/g, '\\\\')),
@@ -620,7 +632,7 @@ const DIALECTS = {
   },
   sqlite: {
     ...COMMON, name: 'SQLite', q: quoter(SQLITE_KEYWORDS, '"'), types: SQLITE_TYPES, varchar: 'VARCHAR',
-    native: SQLITE_NATIVE, names: givenNames(Infinity, 'table', 'schema'), maxName: Infinity, // a name may be any length
+    native: SQLITE_NATIVE, names: givenNames('table', 'schema'), nameMax: { most: Infinity, characters: false }, // a name may be any length
     anyType: true, // any name is a type's, which only says how a value is kept
     autoSQL: ' PRIMARY KEY AUTOINCREMENT', numberingIsKey: true, fkInline: true, // tables may point to tables made later
     keysAtStart: cyclic => [cyclic ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;'], keysOn: 'PRAGMA foreign_keys = ON;',
@@ -628,13 +640,13 @@ const DIALECTS = {
     dataStart: () => ['PRAGMA foreign_keys = OFF;'], dataEnd: () => ['PRAGMA foreign_keys = ON;'],
   },
   postgres: {
-    ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"', '"', true), schema: 'public', maxName: 63,
+    ...COMMON, name: 'PostgreSQL', q: quoter(POSTGRES_RESERVED, '"', '"', true), schema: 'public', nameMax: { most: 63, characters: false },
     types: PG_TYPES, native: PG_NATIVE, varchar: 'VARCHAR', unkeyable: ['json', 'point', 'polygon', 'xml'],
     // what starts its types of several words the text has no word for (CHARACTER VARYING, NATIONAL CHARACTER, NCHAR VARYING)
     typeOffers: PG_OFFERS, otherTypes: ['character', 'nchar', 'national'], definesTypes: true, arrays: true,
     keyLengthsMayDiffer: true, keyTypeKinds: PG_KEY_KINDS, keyTypeWidenings: PG_KEY_WIDENINGS,
     keyTypesNeeded: "of one kind, or the first of a type it converts to the second's by itself",
-    names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema', index: 'schema' }, max: 63, exact: true },
+    names: { name: postgresName, own: ['pk', 'unique', 'fk'], scope: { pk: 'schema', unique: 'schema', fk: 'schema', index: 'schema' }, exact: true },
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', dropTail: 'CASCADE', problems: postgresProblems,
     bool: (b, c) => c && /^bit\b/.test(c.effType) ? `B'${b ? 1 : 0}'` : upperBool(b),
     // one transaction, with the keys to tables made later checked at COMMIT, so the rows can go in in any order;
@@ -646,11 +658,11 @@ const DIALECTS = {
     }))],
   },
   mssql: {
-    ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', maxName: 128, nPrefix: true,
+    ...COMMON, name: 'SQL Server', q: quoter(MSSQL_RESERVED, '[', ']'), schema: 'dbo', nameMax: { most: 128, characters: true }, nPrefix: true,
     types: MSSQL_TYPES, native: ['geometry', 'money', 'xml', 'rowversion'], sizeLimits: MSSQL_SIZE_LIMITS, varchar: 'NVARCHAR',
     // what starts its types of several words the text has no word for (CHARACTER VARYING, NATIONAL CHAR VARYING)
     typeOffers: MSSQL_OFFERS, otherTypes: ['character', 'national'], definesTypes: true,
-    unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema', 'table'),
+    unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames('schema', 'table'),
     defaultFraction: { size: '(7)', types: ['TIME', 'DATETIMEOFFSET', 'DATETIME2'] }, keyTypesNeeded: 'of the same type and size',
     autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
     serverMade: ['rowversion'], // a ROWVERSION's value is the server's, which no INSERT gives
@@ -663,7 +675,7 @@ const DIALECTS = {
     dataTable: t => t.cols.some(c => c.autoInc) ? [[`SET IDENTITY_INSERT ${tableSQL(DIALECTS.mssql, t.name)} ON;`], [`SET IDENTITY_INSERT ${tableSQL(DIALECTS.mssql, t.name)} OFF;`]] : [[], []],
   },
   oracle: {
-    ...COMMON, name: 'Oracle', q: quoter(ORACLE_RESERVED, '"'), maxName: 128, indexNames: givenNames(128, 'schema', 'schema'),
+    ...COMMON, name: 'Oracle', q: quoter(ORACLE_RESERVED, '"'), nameMax: { most: 128, characters: false }, indexNames: givenNames('schema', 'schema'),
     type: oracleType, problems: oracleProblems, dropTail: 'CASCADE CONSTRAINTS', defaultFirst: true, skipIndexes: oracleSkipIndexes,
     // its object types are types of its own; what starts those of several words the text has no word for (CHARACTER
     // VARYING, NATIONAL CHAR, NCHAR VARYING, LONG RAW)
@@ -685,7 +697,8 @@ function genSQL(tables, dialect = 'mariadb') { return genSchema(tables, dialectO
 // What the database refuses (or warns about) in the diagram, and what the script writes otherwise
 function dialectProblems(tables, dialect = 'mariadb') {
   const D = dialectOf(dialect);
-  return [...unknownTypeProblems(tables, D), ...D.problems(tables), ...standInNotes(tables, D), ...shapelessNotes(tables)];
+  return [...nameLengthProblems(tables, D), ...unknownTypeProblems(tables, D), ...D.problems(tables), ...standInNotes(tables, D),
+    ...shapelessNotes(tables)];
 }
 
 // A type the database hasn't, written as the one that stands in for it (standIn), or an unsigned number as the

@@ -328,6 +328,11 @@ Pet
   Id
   Name [delete cascade]
 `, 'is for a foreign key'],
+  // 60 characters, 66 bytes: too long for PostgreSQL, which counts a name's bytes; the others count characters, or allow 128 bytes
+  'a name too long in bytes': [`Rapport
+  Id
+  ÅrligSammanställningAvFörsäljningsöversiktensMånadsrapporter int unique
+`, { postgres: 'ÅrligSammanställning… is 66 bytes; PostgreSQL allows 63' }],
   // the text only warns of a type it doesn't know; a database that hasn't it refuses it, with the nearest it has
   'types a database lacks': [`Thing
   Id
@@ -587,7 +592,7 @@ const RUN = {
         if (/INSERT INTO \S*Route/.test(script)) fail(where, 'sample rows for Route');
         if (!/INSERT INTO \S*Place/.test(script) || /POINT\(|'\w+ \w+'\)/.test(script.split('-- Sample data')[1].replace(/'[^']*'/g, ''))) fail(where, 'Place has no rows, or a made-up shape');
       }
-      const max = vm.runInContext(`dialectOf('${dialect}').maxName`, ctx);
+      const max = vm.runInContext(`dialectOf('${dialect}').nameMax.most`, ctx);
       if (isFinite(max) && new RegExp(`\\b\\w{${max + 1},}\\b`).test(script.replace(/'[^']*'/g, ''))) fail(where, `a name longer than ${max} characters`);
       if (!run[dialect]) continue;
       const res = RUN[dialect](script);
