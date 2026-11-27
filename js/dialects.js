@@ -97,11 +97,8 @@ function givenName(kind, table, column, number, max) {
   const base = kind === 'pk' ? `PK_${table}` : `${NAME_PREFIXES[kind]}_${table}_${column}`, suffix = number ? '_' + (number + 1) : '';
   return clipUtf8(base, max - utf8Length(suffix)) + suffix;
 }
-// MariaDB's own: PRIMARY, a unique key named after its first column (numbered from _2); a foreign key and an index
-// given their names
-const mariadbName = (kind, table, column, number, max) => kind === 'pk' ? 'PRIMARY'
-  : kind === 'unique' ? (number ? clipUtf8(column, max - utf8Length('_' + (number + 1))) + '_' + (number + 1) : column)
-  : givenName(kind, table, column, number, max);
+// MariaDB's own: PRIMARY; a unique key, a foreign key and an index given their names
+const mariadbName = (kind, table, column, number, max) => kind === 'pk' ? 'PRIMARY' : givenName(kind, table, column, number, max);
 // PostgreSQL's own: table_column_fkey (table_pkey, table_column_key), the longer name cut first until it fits,
 // then numbered fkey1, fkey2…; an index given its name
 function postgresName(kind, table, column, number, max) {
@@ -365,7 +362,8 @@ const isMax = t => /\(MAX\)/.test(mssqlType(t));
 
 // ─── The script ──────────────────────────────────────────────────────────────
 // One for every database, as jaidb's generate_schema_sql writes it, with what differs in DIALECTS: tables in
-// key order, each with its columns (type, NULL, numbering, DEFAULT, UNIQUE), its primary key, its unique keys over
+// key order, each with its columns (type, NULL, numbering, DEFAULT, UNIQUE), its primary key, the UNIQUE of its
+// columns where D.uniqueApart (MariaDB's and MySQL's, whose column clause takes no name), its unique keys over
 // several columns, its indexes and its foreign keys; a key to a table made later is added after it (where D.fkInline,
 // as SQLite's are, it goes in the table all the same). An index is in CREATE TABLE where D.inlineIndexes (MariaDB's
 // and MySQL's, so that a foreign key that may use it makes none of its own), else made right after its table. Before
@@ -413,15 +411,17 @@ function genSchema(tables, D) {
   out.push(...[...order].reverse().map(t => `DROP TABLE IF EXISTS ${T(t.name)}${D.dropTail ? ' ' + D.dropTail : ''};`), '');
   const deferred = [];
   for (const t of order) {
-    const n = names.get(t), w = colWidth(t, Q);
+    const n = names.get(t), w = colWidth(t, Q), apart = [];
     const defs = t.cols.map(c => {
       const auto = c.autoInc ? D.autoSQL : '', unique = n.unique.get(c);
+      if (unique && D.uniqueApart) apart.push(`  ${unique.sql}UNIQUE (${Q(c.name)})`);
       const rest = D.autoAlone && c.autoInc ? auto // Oracle: the identity says the rest
         : (D.defaultFirst ? defaultSQL(c, D) + nullSQL(c) : nullSQL(c) + auto + defaultSQL(c, D)) +
-          (unique ? ` ${unique.sql}UNIQUE` : '') + (D.enumCheck ? enumCheckSQL(c, Q) : '');
+          (unique && !D.uniqueApart ? ` ${unique.sql}UNIQUE` : '') + (D.enumCheck ? enumCheckSQL(c, Q) : '');
       return column(c, w, Q, D.type ? D.type(c.effType) : typeSQL(c.effType, D), rest);
     });
     if (n.pk) defs.push(`  ${n.pk.sql}PRIMARY KEY (${keyList(t.pkCols, Q)})`);
+    defs.push(...apart);
     for (const ix of n.indexes) { // after the tables, with the keys added later
       deferred.push(`CREATE UNIQUE INDEX ${Q(ix.name)} ON ${T(t.name)} (${keyList(ix.cols, Q)}) WHERE ${ix.cols.map(c => Q(c.name) + ' IS NOT NULL').join(' AND ')};`);
     }
@@ -540,7 +540,8 @@ function oracleProblems(tables) {
 // keysOn turn the foreign key checks off around a cycle; dropKey(table, name) drops a key before its table,
 // dropTail ends DROP TABLE. fkInline: keys to tables made later go in the table too. numberingIsKey: the
 // numbered column is the primary key in its own clause. nullUniqueIndex: a unique column that may be null is a
-// filtered unique index. inlineIndexes: indexes go inside CREATE TABLE. enumCheck: an enum gets a CHECK.
+// filtered unique index. inlineIndexes: indexes go inside CREATE TABLE. uniqueApart: a column's UNIQUE, which its
+// clause can't name, is a UNIQUE (column) line of its own after the primary key. enumCheck: an enum gets a CHECK.
 // autoAlone, defaultFirst, deferredTail, skipIndexes: Oracle's, see genSchema.
 // Sample rows (sampleInserts): dataStart/dataEnd go around them, dataTable(t) around each table's; serverMade: the types
 // whose values the server gives, which they leave out.
@@ -560,8 +561,8 @@ const MARIADB = {
   types: MARIADB_TYPES, native: MARIADB_NATIVE, sizeLimits: MARIADB_SIZE_LIMITS, varchar: 'VARCHAR', signWords: true,
   keyLengthsMayDiffer: true, keyTypeKinds: MARIADB_KEY_KINDS, keyTypesNeeded: 'of one type and sign, their sizes aside',
   unprimary: MARIADB_UNPRIMARY, primarySizeLimits: MARIADB_PRIMARY_SIZES, pointsAtIndexes: true,
-  names: { name: mariadbName, own: ['pk', 'unique'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema', index: 'table' }, max: 64 },
-  autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, enumCheck: false,
+  names: { name: mariadbName, own: ['pk'], pk: true, scope: { pk: 'table', unique: 'table', fk: 'schema', index: 'table' }, max: 64 },
+  autoSQL: ' AUTO_INCREMENT', noActions: ['no action', 'restrict'], inlineIndexes: true, uniqueApart: true, enumCheck: false,
   keysOff: 'SET FOREIGN_KEY_CHECKS = 0;', keysOn: 'SET FOREIGN_KEY_CHECKS = 1;',
   problems: mariadbProblems, str: s => sqlStr(s.replace(/\\/g, '\\\\')),
   dataStart: () => ['SET FOREIGN_KEY_CHECKS = 0;'], dataEnd: () => ['SET FOREIGN_KEY_CHECKS = 1;'],
