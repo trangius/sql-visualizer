@@ -259,7 +259,7 @@ function effType(c, seen) { return c.type ? normType(c.type) : defaultType(c, se
 const SQL_TYPE_NAMES = new Set(`vc tinyint smallint mediumint int integer bigint decimal dec numeric fixed float
 double real bit bool boolean serial char varchar binary varbinary tinytext text mediumtext longtext tinyblob
 blob mediumblob longblob enum set date datetime timestamp time year json uuid inet4 inet6 geometry point
-linestring polygon`.split(/\s+/));
+linestring polygon timestamptz timetz jsonb interval inet cidr macaddr money xml rowversion`.split(/\s+/));
 const TYPE_MODIFIERS = new Set(['unsigned', 'signed', 'zerofill', 'precision']);
 const FLAG_WORDS = ['pk', 'null', 'unique', 'auto_increment', 'a_i'];
 

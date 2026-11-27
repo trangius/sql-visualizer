@@ -177,11 +177,11 @@ function typeInfo(c) {
     int: INT_TYPES.has(base) || base === 'year',
     max: bits ? 2 ** (bits + (unsigned ? 1 : 0)) - 1 : Infinity,
     bool: base === 'bool' || base === 'boolean' || /^tinyint\(1\)/.test(t) || base === 'bit',
-    dec: /^(decimal|dec|numeric|fixed|float|double|real)$/.test(base),
+    dec: /^(decimal|dec|numeric|fixed|float|double|real|money)$/.test(base),
     scale: /^(decimal|dec|numeric|fixed)$/.test(base) ? (args.length ? args[1] || 0 : 0) : 2,
     prec: /^(decimal|dec|numeric|fixed)$/.test(base) ? args[0] || 10 : 15,
-    date: /^(date|datetime|timestamp)$/.test(base),
-    time: base === 'time',
+    date: /^(date|datetime|timestamp|timestamptz)$/.test(base),
+    time: base === 'time' || base === 'timetz',
     options: base === 'enum' || base === 'set' ? enumOptions(t) : null,
     shape: SPATIAL.includes(base), // a map's: made-up rows leave it NULL
   };
@@ -310,9 +310,13 @@ function rawValue(t, c, i, ctx, ti, key) {
   // values the database checks the form of
   const hex = (n, k) => Array.from({ length: n }, (_, j) => '0123456789abcdef'[between(0, 15, key + k + j)]).join('');
   if (ti.base === 'uuid') return `${hex(8, 'a')}-${hex(4, 'b')}-4${hex(3, 'c')}-8${hex(3, 'd')}-${hex(12, 'e')}`;
-  if (ti.base === 'json') return JSON.stringify({ [c.name]: i + 1 });
-  if (ti.base === 'inet4') return `10.0.${between(0, 255, key + 'a')}.${between(1, 254, key + 'b')}`;
+  if (ti.base === 'json' || ti.base === 'jsonb') return JSON.stringify({ [c.name]: i + 1 });
+  if (ti.base === 'inet4' || ti.base === 'inet') return `10.0.${between(0, 255, key + 'a')}.${between(1, 254, key + 'b')}`;
   if (ti.base === 'inet6') return `2001:db8::${hex(4, 'a')}`;
+  if (ti.base === 'cidr') return `10.${between(0, 255, key + 'a')}.0.0/16`;
+  if (ti.base === 'macaddr') return `08:00:2b:${hex(2, 'a')}:${hex(2, 'b')}:${hex(2, 'c')}`;
+  if (ti.base === 'interval') return `${between(1, 30, key)} days`;
+  if (ti.base === 'rowversion') return hex(8, 'a');
   const person = ctx.person;
   if (ti.time) return `${pad2(between(8, 17, key + 'h'))}:${pad2(between(0, 3, key + 'n') * 15)}:00`;
   if (ti.date || plan.field === 'birth') {
@@ -590,8 +594,9 @@ async function sampleInserts(tables, dialect = 'mariadb') {
     if (shapeColumn(t)) out.push(`-- ${t.name}: no rows, ${shapeColumn(t).name} is a shape that can't be null`);
     if (!rows.length) continue;
     const [before, after] = D.dataTable?.(t) ?? [[], []];
-    out.push(...before, `INSERT INTO ${tableSQL(D, t.name)} (${t.cols.map(c => D.q(c.name)).join(', ')}) VALUES`);
-    out.push(rows.map(r => `  (${t.cols.map(c => lit(c, r.values.get(c))).join(', ')})`).join(',\n') + ';', ...after);
+    const cols = t.cols.filter(c => !D.serverMade?.includes(typeParts(c.effType).base)); // the server gives those
+    out.push(...before, `INSERT INTO ${tableSQL(D, t.name)} (${cols.map(c => D.q(c.name)).join(', ')}) VALUES`);
+    out.push(rows.map(r => `  (${cols.map(c => lit(c, r.values.get(c))).join(', ')})`).join(',\n') + ';', ...after);
   }
   out.push(...D.dataEnd(order, cyclic), '');
   return out.join('\n');

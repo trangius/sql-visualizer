@@ -259,7 +259,8 @@ const keyTypeProblems = (tables, D, unlinkable = () => false) => linkTypeProblem
 // ─── Types ───────────────────────────────────────────────────────────────────
 // A type as jaidb writes it for the database (written_type), with no server version known: one past its size
 // limit as the type D.sizeLimits says ({ name: [max, instead, % the size] }); vc as D.varchar(n); a short name
-// as D.types has it ({ name: [sql, the sql when unsigned, 'sized': its size kept where it has one] }); one of
+// as D.types has it ({ name: [sql, the sql when unsigned, 'sized': its size kept where it has one, 'all': all after
+// its name kept] }); one of
 // TYPE_FALLBACKS the database hasn't (D.native) as the first of its stand-ins the database has, else the last;
 // anything else in capitals. Where !D.signWords, UNSIGNED, SIGNED and ZEROFILL go (they are MariaDB's and MySQL's).
 
@@ -288,7 +289,7 @@ function typeSQL(t, D) {
   if (base === 'vc') return `${D.varchar}(${args ?? DEFAULT_VC})` + sqlType(tail);
   if (!row) return sqlType(t.slice(0, t.length - rest.length) + tail);
   if (unsigned && row[1]) return row[1];
-  return row[2] === 'sized' && args != null ? row[0] + sqlType(signless(t.slice(base.length))) : row[0];
+  return row[2] === 'all' || (row[2] === 'sized' && args != null) ? row[0] + sqlType(signless(t.slice(base.length))) : row[0];
 }
 // Whether a unique key may be over a column of the type there, or where `primary` a primary key, a foreign key or an
 // index, as jaidb's p_type_keyable says: keyed as the type that stands in for it past its size limit, or where the
@@ -311,12 +312,12 @@ const TEXT_TYPES = ['text', 'tinytext', 'mediumtext', 'longtext'], BLOB_TYPES = 
 const typeRows = (names, row) => Object.fromEntries(names.map(n => [n, row]));
 const SPATIAL = ['geometry', 'point', 'linestring', 'polygon'];
 
-// MariaDB: as written, but REAL is DOUBLE, and CHAR and BINARY hold 255 at most. UUID, INET6 and INET4 are its
-// own from 10.7, 10.5 and 10.10: with no version known, text that holds one. A unique key over TEXT, BLOB, a
-// geometry, a linestring or a polygon is hashed; no primary key nor index may be over one, nor over more than 3072
-// bytes (768 characters), as jaidb has it (the server itself makes an index over TEXT one over its first 768 characters,
-// which the text can't say).
-const MARIADB_TYPES = { real: ['DOUBLE'] };
+// MariaDB: as written, but REAL is DOUBLE, PostgreSQL's times with a zone are its times without, and CHAR and BINARY
+// hold 255 at most. UUID, INET6 and INET4 are its own from 10.7, 10.5 and 10.10: with no version known, text that
+// holds one. A unique key over TEXT, BLOB, a geometry, a linestring or a polygon is hashed; no primary key nor index
+// may be over one, nor over more than 3072 bytes (768 characters), as jaidb has it (the server itself makes an index
+// over TEXT one over its first 768 characters, which the text can't say).
+const MARIADB_TYPES = { timestamptz: ['TIMESTAMP', '', 'all'], timetz: ['TIME', '', 'all'], real: ['DOUBLE'] };
 const MARIADB_NATIVE = [...SPATIAL, 'enum', 'set'];
 const MARIADB_SIZE_LIMITS = { char: [255, 'vc(%)'], binary: [255, 'varbinary(%)'] };
 const MARIADB_UNPRIMARY = [...TEXT_TYPES, ...BLOB_TYPES, 'geometry', 'linestring', 'polygon'];
@@ -350,11 +351,12 @@ const PG_KEY_KINDS = { ...typeRows(['SMALLINT', 'INT', 'BIGINT'], 'integer'), ..
 const PG_KEY_WIDENINGS = { ...typeRows(['SMALLINT', 'INT', 'BIGINT'], ['NUMERIC', 'REAL', 'DOUBLE PRECISION']),
   NUMERIC: ['REAL', 'DOUBLE PRECISION'], TIME: ['TIMETZ', 'INTERVAL'] };
 
-// SQL Server: text is NVARCHAR, so any language fits. NVARCHAR holds 4000 characters and the others 8000 bytes,
-// past which they are (MAX), which no key may be over; a BIT is one bit.
+// SQL Server: text is NVARCHAR, so any language fits; a time stamp with a zone is a DATETIMEOFFSET, a time's zone
+// goes. NVARCHAR holds 4000 characters and the others 8000 bytes, past which they are (MAX), which no key may be
+// over; a BIT is one bit.
 const MSSQL_TYPES = {
-  smallint: ['SMALLINT', 'INT'], bigint: ['BIGINT', 'DECIMAL(20,0)'], mediumint: ['INT'], int: ['INT', 'BIGINT'],
-  datetime: ['DATETIME2'], timestamp: ['DATETIME2'], double: ['FLOAT'], float: ['REAL'], bool: ['BIT'],
+  smallint: ['SMALLINT', 'INT'], bigint: ['BIGINT', 'DECIMAL(20,0)'], timestamptz: ['DATETIMEOFFSET', '', 'all'], timetz: ['TIME', '', 'all'],
+  mediumint: ['INT'], int: ['INT', 'BIGINT'], datetime: ['DATETIME2'], timestamp: ['DATETIME2'], double: ['FLOAT'], float: ['REAL'], bool: ['BIT'],
   ...typeRows([...TEXT_TYPES, 'json'], ['NVARCHAR(MAX)']), ...typeRows(BLOB_TYPES, ['VARBINARY(MAX)']), uuid: ['UNIQUEIDENTIFIER'], year: ['SMALLINT'],
 };
 const MSSQL_SIZE_LIMITS = { vc: [4000, 'text'], char: [8000, 'text'], binary: [8000, 'blob'], varbinary: [8000, 'blob'], bit: [1, 'bigint'] };
@@ -484,7 +486,8 @@ function mssqlProblems(tables) {
 // Oracle Database 23ai: BOOLEAN, multi-row VALUES and DROP TABLE IF EXISTS are new in it.
 // Names are left unquoted (Oracle folds them to upper case) unless they are reserved.
 // Text is VARCHAR2(n CHAR), so n is characters, not bytes. A date is written DATE '2024-01-31',
-// whatever the session's date format is. There is no TIME type: a time of day is text.
+// whatever the session's date format is. A time stamp with a zone is one WITH LOCAL TIME ZONE, as PostgreSQL's is: a
+// moment, which a key may be over (not one WITH TIME ZONE). There is no TIME type: a time of day is text, its zone too.
 
 const ORACLE_TYPES = { tinyint: 'NUMBER(3)', smallint: 'NUMBER(5)', mediumint: 'NUMBER(7)', int: 'NUMBER(10)',
   integer: 'NUMBER(10)', bigint: 'NUMBER(19)', serial: 'NUMBER(20)', bool: 'BOOLEAN', boolean: 'BOOLEAN', bit: 'BOOLEAN',
@@ -492,7 +495,7 @@ const ORACLE_TYPES = { tinyint: 'NUMBER(3)', smallint: 'NUMBER(5)', mediumint: '
   longtext: 'CLOB', set: 'VARCHAR2(255 CHAR)', json: 'JSON', tinyblob: 'BLOB', blob: 'BLOB', mediumblob: 'BLOB',
   longblob: 'BLOB', date: 'DATE', datetime: 'TIMESTAMP', timestamp: 'TIMESTAMP', time: 'VARCHAR2(8 CHAR)', year: 'NUMBER(4)',
   uuid: 'VARCHAR2(36 CHAR)', inet4: 'VARCHAR2(15 CHAR)', inet6: 'VARCHAR2(45 CHAR)', geometry: 'CLOB', point: 'CLOB', linestring: 'CLOB',
-  polygon: 'CLOB' };
+  polygon: 'CLOB', timestamptz: 'TIMESTAMP WITH LOCAL TIME ZONE', timetz: 'VARCHAR2(14 CHAR)' };
 const ORACLE_UNSIGNED = { int: 'NUMBER(10)', integer: 'NUMBER(10)', bigint: 'NUMBER(20)' };
 function oracleType(t) {
   const { base, args, unsigned } = typeParts(t);
@@ -502,7 +505,10 @@ function oracleType(t) {
   if (base === 'enum') return text(Math.max(1, ...enumOptions(t).map(v => v.length)));
   if (/^(decimal|dec|numeric|fixed)$/.test(base)) return `NUMBER(${args ?? 10})`;
   if (base === 'binary' || base === 'varbinary') return `RAW(${Math.min(+(args ?? 1), 2000)})`;
-  return (unsigned && ORACLE_UNSIGNED[base]) || ORACLE_TYPES[base] || sqlType(t);
+  const own = (unsigned && ORACLE_UNSIGNED[base]) || ORACLE_TYPES[base], list = TYPE_FALLBACKS[base];
+  if (own || !list) return own || sqlType(t);
+  // one it hasn't: the first of TYPE_FALLBACKS' stand-ins it has, else the last
+  return oracleType(list.find((c, i) => i === list.length - 1 || ORACLE_TYPES[typeParts(c).base]));
 }
 const isClob = t => /^(CLOB|BLOB|JSON)$/.test(oracleType(t));
 
@@ -536,7 +542,8 @@ function oracleProblems(tables) {
 // numbered column is the primary key in its own clause. nullUniqueIndex: a unique column that may be null is a
 // filtered unique index. inlineIndexes: indexes go inside CREATE TABLE. enumCheck: an enum gets a CHECK.
 // autoAlone, defaultFirst, deferredTail, skipIndexes: Oracle's, see genSchema.
-// Sample rows (sampleInserts): dataStart/dataEnd go around them, dataTable(t) around each table's.
+// Sample rows (sampleInserts): dataStart/dataEnd go around them, dataTable(t) around each table's; serverMade: the types
+// whose values the server gives, which they leave out.
 // What a foreign key's types must be (keyTypesFit): keyLengthsMayDiffer, keyTypeKinds, keyTypeWidenings,
 // defaultFraction, and keyTypesNeeded to say it.
 
@@ -601,6 +608,7 @@ const DIALECTS = {
     unkeyable: [...TEXT_TYPES, 'json', ...BLOB_TYPES, 'xml', 'geometry'], names: givenNames(128, 'schema', 'table'),
     defaultFraction: { size: '(7)', types: ['TIME', 'DATETIMEOFFSET', 'DATETIME2'] }, keyTypesNeeded: 'of the same type and size',
     autoSQL: ' IDENTITY(1,1)', noActions: ['no action', 'restrict'], nullUniqueIndex: true, problems: mssqlProblems,
+    serverMade: ['rowversion'], // a ROWVERSION's value is the server's, which no INSERT gives
     dropKey: (T, name) => `IF OBJECT_ID(N'${T}', N'U') IS NOT NULL ALTER TABLE ${T} DROP CONSTRAINT IF EXISTS ${name};`,
     str: s => 'N' + sqlStr(s), bool: b => b ? '1' : '0', today: 'CAST(GETDATE() AS DATE)',
     bin: s => `CONVERT(VARBINARY(MAX), ${sqlStr(s)})`, // text doesn't turn into bytes by itself here
@@ -616,7 +624,7 @@ const DIALECTS = {
     autoSQL: ' GENERATED BY DEFAULT AS IDENTITY', autoAlone: true, deferredTail: ' DEFERRABLE INITIALLY DEFERRED',
     noActions: ['no action', 'restrict'], // what it does anyway
     today: 'TRUNC(SYSDATE)',
-    typed: (c, s) => /^date\b/.test(c.effType) ? `DATE ${sqlStr(s)}` : /^(datetime|timestamp)\b/.test(c.effType) ? `TIMESTAMP ${sqlStr(s)}` : undefined,
+    typed: (c, s) => /^date\b/.test(c.effType) ? `DATE ${sqlStr(s)}` : /^(datetime|timestamp|timestamptz)\b/.test(c.effType) ? `TIMESTAMP ${sqlStr(s)}` : undefined,
     bin: s => `UTL_RAW.CAST_TO_RAW(${sqlStr(s)})`,
     // one transaction, so keys to tables made later are checked at the end; then numbering goes on after the sample Ids
     dataEnd: order => ['COMMIT;', ...order.flatMap(t => t.cols.filter(c => c.autoInc).map(c =>
