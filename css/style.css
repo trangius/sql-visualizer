@@ -612,7 +612,7 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   background: var(--box-bg); color: var(--fg); width: 100%; min-width: 0;
 }
 .dlg input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.dlg input.invalid { border-color: var(--err); outline-color: var(--err); }
+.dlg :is(input, select).invalid { border-color: var(--err); outline-color: var(--err); }
 .dlg input::placeholder { color: var(--faint); }
 .dlg input.c-type::placeholder { color: var(--muted); } /* the type a column gets when none is written: as good as typed */
 .field { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-weight: 500; }
@@ -663,6 +663,10 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 .fk-chip:hover .fk-label, .fk-chip:focus-within .fk-label { padding-right: 28px; } /* room for the × */
 .fk-chip:hover .fk-unlink, .fk-chip:focus-within .fk-unlink { opacity: 1; }
 .fk-unlink:hover { background: var(--line2); color: var(--fg); }
+/* the reference of a column of a foreign key over several columns: changed on Combined */
+.fk-chip.in-fk { opacity: .55; }
+.fk-chip.in-fk:hover { background: var(--panel); }
+.fk-label:disabled { cursor: default; }
 .c-actions { display: flex; justify-content: flex-end; }
 .icon-x {
   width: 28px; height: 28px; padding: 0; line-height: 1; border: 0; border-radius: 7px;
@@ -685,13 +689,16 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 /* a key or index over several columns: its kind, its columns as chips in a field as wide on every row (wrapping), a +
    at their end that adds one, × */
 #tdCombined { min-height: 74px; }
-.cb-row { display: grid; grid-template-columns: 104px 1fr 28px; gap: 6px; align-items: start; padding: 3px 0; }
-.cb-kind {
+.cb-row { display: grid; grid-template-columns: 150px 1fr 28px; gap: 6px; align-items: start; padding: 3px 0; }
+.cb-kind, .fk-pick {
   height: 32px; padding: 0 26px 0 9px; border: 1px solid var(--line); border-radius: 7px; font: 500 12px var(--mono); letter-spacing: .03em;
   color: var(--fg); appearance: none; -webkit-appearance: none; cursor: pointer;
   background: var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a857c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 6px center;
 }
-.cb-kind:hover { border-color: var(--line2); }
+.cb-kind:hover, .fk-pick:hover:not(:disabled) { border-color: var(--line2); }
+.fk-pick { width: 100%; min-width: 0; font: 12.5px var(--mono); letter-spacing: 0; text-overflow: ellipsis; }
+.fk-pick.unpicked { color: var(--muted); }
+.fk-pick:disabled { opacity: .5; cursor: default; }
 .cb-cols {
   display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; min-width: 0; min-height: 32px; padding: 3px 4px;
   border: 1px solid var(--line); border-radius: 7px; background: var(--box-bg);
@@ -712,8 +719,18 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
 }
 .cb-add:hover:not(:disabled), .cb-add:focus-visible { background-color: var(--hover); color: var(--fg); }
 .cb-add:disabled { opacity: .4; cursor: default; }
-.cb-add option, .cb-kind option { color: var(--fg); background: var(--panel); font: 13px var(--font); }
+.cb-add option, .cb-kind option, .fk-pick option { color: var(--fg); background: var(--panel); font: 13px var(--font); }
 .cb-row .icon-x { height: 32px; }
+/* a foreign key over several columns: FK, → the key it points at, ×; under it, for each column of the key, the column
+   here that points at it → that key column, lined up under the kind and the key */
+.fk-form { padding: 3px 0; }
+.fk-head, .fk-line { display: grid; grid-template-columns: 150px 16px minmax(0, 300px) 1fr 28px; gap: 6px; align-items: center; }
+.fk-line { grid-template-columns: 150px 16px minmax(0, 140px) 1fr; margin-top: 4px; }
+.fk-arrow { color: var(--muted); text-align: center; }
+.fk-keycol { font: 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fk-note { color: var(--warn); font-size: 12.5px; }
+.fk-form .icon-x { height: 32px; }
+.fk-line + .field-error { margin: 4px 0 6px; }
 .cb-empty { color: var(--muted); font-size: 12.5px; padding: 8px 0; line-height: 1.5; }
 /* why Save didn't: under the field it is about */
 .field-error { color: var(--err); font-size: 12.5px; margin: 0 0 6px; scroll-margin-bottom: 8px; }
