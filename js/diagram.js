@@ -139,6 +139,27 @@ const footLines = t => [
 const atNames = f => f.group != null || f.index;
 const footLabelW = foot => Math.max(0, ...foot.map(f => textW(f.label + ' ', FONTS.flags)));
 const footTop = n => ROWS_TOP + Math.max(1, n) * ROW_H + 6;
+// A footer line widens its box up to this, or as wide as its rows make it; a longer one goes on after a comma on the
+// next line
+const FOOT_MAX_W = 380;
+// The lines `text` takes in a box `room` wide when it starts at x = `start`: each as long as fits, ending at a comma
+function footWrap(text, start, room) {
+  const lines = [];
+  let from = 0, cut = -1, at = 0; // the line so far starts at `from`; the last comma that fits ends at `cut`
+  for (;;) {
+    const next = text.indexOf(', ', at), end = next < 0 ? text.length : next + 1;
+    if (cut >= 0 && start + textW(text.slice(from, end), FONTS.type) + PAD_X > room) {
+      lines.push(text.slice(from, cut));
+      from = cut + 1;
+      cut = -1;
+      continue;
+    }
+    if (next < 0) break;
+    cut = end;
+    at = next + 2;
+  }
+  return [...lines, text.slice(from)];
+}
 
 // Data view: the box is a real table, column names across and a few sample rows below
 // (see sample.js). Instead of arrows, colours link the rows: each row of a referenced
@@ -190,10 +211,14 @@ function measureTable(t) {
   const rows = shownCols(t).map(c => rowInfo(c, t)), foot = footLines(t), lead = dotsLead(t, keyGroups(t)), labelW = footLabelW(foot);
   const w = Math.max(MIN_W, textW(t.name, FONTS.head) + 2 * PAD_X + 12, ...rows.map(r =>
     PAD_X + lead + BADGE_W + GAP + textW(r.name, r.bold ? FONTS.pk : FONTS.name) + 16 +
-    (r.flags ? textW(r.flags, FONTS.flags) + 6 : 0) + textW(r.type, FONTS.type) + PAD_X),
-    ...foot.map(f => (atNames(f) ? PAD_X + BADGE_W + GAP + lead : PAD_X) + labelW + textW(f.text, FONTS.type) + PAD_X));
-  const h = footTop(rows.length) + (foot.length ? foot.length * FOOT_H + 6 : 0);
-  return { w: Math.ceil(w / 10) * 10, h, rows };
+    (r.flags ? textW(r.flags, FONTS.flags) + 6 : 0) + textW(r.type, FONTS.type) + PAD_X));
+  // f.lines: the footer line's text as it wraps
+  const room = Math.max(w, FOOT_MAX_W), start = f => (atNames(f) ? PAD_X + BADGE_W + GAP + lead : PAD_X) + labelW;
+  for (const f of foot) f.lines = footWrap(f.text, start(f), room);
+  const wide = Math.max(w, ...foot.flatMap(f => f.lines.map(l => start(f) + textW(l, FONTS.type) + PAD_X)));
+  const lines = foot.reduce((n, f) => n + f.lines.length, 0);
+  const h = footTop(rows.length) + (lines ? lines * FOOT_H + 6 : 0);
+  return { w: Math.ceil(wide / 10) * 10, h, rows, foot };
 }
 const rowY = i => ROWS_TOP + i * ROW_H + ROW_H / 2;
 // The height in a box an arrow from or to these rows runs at: a row's centre line, or halfway across a foreign
@@ -1333,7 +1358,7 @@ function computeGeometry() {
   ensurePositions(tables, dims);
   const boxes = new Map(tables.map(t => {
     const d = dims.get(t);
-    return [t, { x: pos[t.name].x, y: pos[t.name].y, w: d.w, h: d.h, rows: d.rows, data: d.data }];
+    return [t, { x: pos[t.name].x, y: pos[t.name].y, w: d.w, h: d.h, rows: d.rows, foot: d.foot, data: d.data }];
   }));
   const edges = state.dataView ? [] : diagramEdges(tables, boxes);
   const held = drag?.kind === 'box' && drag.moved ? new Set(tables.filter(t => drag.start[t.name]).map(t => boxes.get(t))) : null;
@@ -1483,19 +1508,21 @@ function boxMarkup(t, b, interactive) {
     }
     s += '</g>';
   });
-  const foot = footLines(t), fy = footTop(b.rows.length);
+  const { foot } = b, fy = footTop(b.rows.length);
   if (foot.length) s += `<line class="sep" x1="0" y1="${fy + .5}" x2="${w}" y2="${fy + .5}"/>`;
   const labelW = footLabelW(foot);
-  foot.forEach((f, k) => {
+  let k = 0; // the footer's lines above this one
+  for (const f of foot) {
     const y = fy + 3 + (k + .5) * FOOT_H;
-    // hovering the line lights up its rows
+    // hovering the line (all of it, where it wraps) lights up its rows
     s += `<g class="keyline" data-cols="${esc(f.cols.map(n => t.name + '.' + n).join('\n'))}">`;
-    if (interactive) s += `<rect class="hit" x="1" y="${y - FOOT_H / 2}" width="${w - 2}" height="${FOOT_H}"/>`;
+    if (interactive) s += `<rect class="hit" x="1" y="${y - FOOT_H / 2}" width="${w - 2}" height="${f.lines.length * FOOT_H}"/>`;
     if (f.group != null) s += keyDot(groups[f.group], f.group, slots - 1, y);
     const lx = atNames(f) ? nx : PAD_X;
     s += `<text class="flags${f.index ? ' idx' : ''}"${f.hue != null ? ` style="fill:oklch(var(--key-l, .55) var(--key-c, .15) ${f.hue})"` : ''} x="${lx}" y="${y}">${f.label}</text>` +
-      `<text class="type" x="${lx + labelW}" y="${y}">${esc(f.text)}</text></g>`;
-  });
+      f.lines.map((l, i) => `<text class="type" x="${lx + labelW}" y="${y + i * FOOT_H}">${esc(l)}</text>`).join('') + '</g>';
+    k += f.lines.length;
+  }
   s += `<rect class="outline" x=".5" y=".5" width="${w - 1}" height="${h - 1}" rx="${r - .5}"/></g>`;
   return s;
 }

@@ -270,6 +270,13 @@ for (const notation of ['arrows', 'uml', 'ratio', 'crowsfoot']) {
   assert.equal(api.footLines(visit).filter(f => f.index).length, 0, 'an index line with the toggle off');
   api.state.indexes = true;
 }
+// A footer line too long for its box goes on after a comma on the next line, the box no wider than such a line needs
+{
+  const cols = Array.from({ length: 12 }, (_, i) => `Part${i}LongName`);
+  const t = model(`Wide\n  Id\n${cols.map(c => `  ${c}`).join('\n')}\n  index (${cols.join(', ')})\n`)[0], m = api.measureTable(t), f = m.foot[0];
+  assert(f.lines.length > 1 && f.lines.slice(0, -1).every(l => l.endsWith(',')) && f.lines.join(' ') === f.text, `a long footer line wraps wrongly: ${JSON.stringify(f.lines)}`);
+  assert(m.w <= 380 && m.h === api.measureTable(model(`Wide\n  Id\n${cols.map(c => `  ${c}`).join('\n')}\n`)[0]).h + f.lines.length * 22 + 6, 'a wrapped footer line has no room in the box');
+}
 // A foreign key over several columns is one arrow, routed as one line (its trunk) from between its rows to between
 // those they point to; at either end its rows' lines fold into it and split from it, each pair the other's mirror
 // image about the trunk, all within a stub of the box; the layout links it once, there
