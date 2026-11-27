@@ -108,10 +108,26 @@ function parseOpts(s, col, line, problems) {
   }
 }
 
-// The [ … ] of a column, as genText and the table dialog write it
+// The [ … ] of a column, as columnLine writes it
 function optsItems(c) {
   return [c.ref && c.onDelete && 'delete ' + c.onDelete, c.ref && c.onUpdate && 'update ' + c.onUpdate,
     c.default != null && 'default ' + c.default].filter(Boolean);
+}
+
+// A column's line, as genText and the table dialog write it: c.type the type to write (none: null or ''), c.pk whether
+// pk is written on it, c.ref what its -> points at ("Table" or "Table.Column"), null for none
+function columnLine(c) {
+  const parts = [c.name];
+  if (c.type) parts.push(c.type);
+  if (c.pk) parts.push('pk');
+  if (c.nullable) parts.push('null');
+  if (c.unique) parts.push('unique');
+  if (c.indexed) parts.push('index');
+  if (c.auto && !isIdName(c.name)) parts.push('auto_increment'); // on Id it goes without saying
+  if (c.ref) parts.push('-> ' + c.ref);
+  const opts = optsItems(c);
+  if (opts.length) parts.push(`[${opts.join(', ')}]`);
+  return '  ' + parts.join(' ');
 }
 
 function parseText(src) {
@@ -479,17 +495,8 @@ function genText(tables, notes) {
     out.push(t.name);
     const pkLine = t.pkCols.length > 1; // only an explicit key can span several columns
     for (const c of t.cols) {
-      const parts = [c.name];
-      if (c.effType !== defaultType(c)) parts.push(c.effType);
-      if (c.isPk && !pkLine && (c.pk || t.pkLine)) parts.push('pk');
-      if (c.nullable) parts.push('null');
-      if (c.unique) parts.push('unique');
-      if (c.indexed) parts.push('index');
-      if (c.autoInc && !isIdName(c.name)) parts.push('auto_increment'); // on Id it goes without saying
-      if (c.ref) parts.push('-> ' + refText(c));
-      const opts = optsItems(c);
-      if (opts.length) parts.push(`[${opts.join(', ')}]`);
-      out.push('  ' + parts.join(' '));
+      out.push(columnLine({ ...c, type: c.effType !== defaultType(c) ? c.effType : null, pk: c.isPk && !pkLine && !!(c.pk || t.pkLine),
+        auto: c.autoInc, ref: c.ref && refText(c) }));
     }
     if (pkLine) out.push(`  pk (${t.pkCols.map(c => c.name).join(', ')})`);
     for (const u of t.multiUniques) out.push(`  unique (${u.cols.map(c => c.name).join(', ')})`);

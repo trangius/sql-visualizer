@@ -606,6 +606,7 @@ body.presenting .card-tl, body.presenting #storageNotice, body.presenting #selec
   display: flex; flex-direction: column; gap: 4px; margin: 0 -20px; padding: 10px 20px 12px; border-top: 1px solid var(--line);
   color: var(--muted); font-size: 12.5px; line-height: 1.45;
 }
+#tdDeleteNote { color: var(--warn); }
 .dlg input[type=text], .dlg input:not([type]) {
   font: 13px var(--mono); height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px;
   background: var(--box-bg); color: var(--fg); width: 100%; min-width: 0;

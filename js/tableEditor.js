@@ -263,13 +263,14 @@ function refreshHints() {
 }
 
 // The band above Save: on the Columns tab, what the Combined tab holds that the rows don't show, as the diagram's
-// footer writes it
+// footer writes it; Delete table armed, the foreign keys into the table, which go with it
 function renderHints() {
   const onCols = dlg.tab === 'cols', key = keyRow(), names = r => r.chips.map(ch => chipName(ch) || 'no name').join(', ');
   const others = dlg.rows.filter(r => r.kind !== 'pk' && r.chips.length).map(r => `${r.kind} (${names(r)})`);
   const hints = [
     [$('#tdKeyHint'), onCols && key?.chips.length ? `The primary key is over ${names(key)}: change it on Combined.` : ''],
     [$('#tdCombinedHint'), onCols && others.length ? `Also on Combined: ${others.join(', ')}.` : ''],
+    [$('#tdDeleteNote'), $('#tdDelete').classList.contains('armed') ? keysIntoText(keysInto(dlg.tables, [dlg.orig])) : ''],
   ];
   for (const [el, text] of hints) { el.textContent = text; el.hidden = !text; }
   $('#tdHints').hidden = hints.every(([, text]) => !text);
@@ -716,23 +717,13 @@ function saveTable() {
   // columns ticked PK that are one key together (only text written so, read as it was, can be) get a line too
   const pkLine = keyLines.pk.length > 0 || cols.filter(c => c.pk).length > 1;
   if (!keyLines.pk.length && pkLine) keyLines.pk.push(`  pk (${cols.filter(c => c.pk).map(c => c.name).join(', ')})`);
-  for (const c of cols) {
-    const parts = [c.name];
-    if (c.type) parts.push(c.type);
-    if (c.pk && !pkLine) parts.push('pk');
-    if (c.nullable) parts.push('null');
-    if (c.unique) parts.push('unique');
-    if (c.indexed) parts.push('index');
-    if (c.auto && !isIdName(c.name)) parts.push('auto_increment');
-    if (c.ref) {
-      const self = toSelf(c);
-      const refCol = self && c.refCol ? renamed.get(lc(c.refCol)) ?? c.refCol : c.refCol;
-      parts.push('-> ' + (self ? name : c.ref) + (refCol ? '.' + refCol : ''));
-    }
-    const opts = optsItems(c);
-    if (opts.length) parts.push(`[${opts.join(', ')}]`);
-    block.push('  ' + parts.join(' ') + (c.comment ? '  ' + c.comment : ''));
-  }
+  // what a column's -> points at, a column of this table by the name it is saved under
+  const refTo = c => {
+    if (!c.ref) return null;
+    const self = toSelf(c), refCol = self && c.refCol ? renamed.get(lc(c.refCol)) ?? c.refCol : c.refCol;
+    return (self ? name : c.ref) + (refCol ? '.' + refCol : '');
+  };
+  for (const c of cols) block.push(columnLine({ ...c, pk: c.pk && !pkLine, ref: refTo(c) }) + (c.comment ? '  ' + c.comment : ''));
   block.push(...keyLines.pk, ...keyLines.unique, ...keyLines.index);
 
   histBegin(dlg.orig ? 'edit table' : 'new table');
@@ -774,6 +765,7 @@ function deleteTable() {
   if (!btn.classList.contains('armed')) {
     btn.classList.add('armed');
     btn.textContent = 'Click again to delete';
+    renderHints();
     return;
   }
   const name = dlg.orig;
@@ -788,12 +780,19 @@ function disarmDelete() {
 
 // ─── Deleting and duplicating tables (the dialog, the keys for the selected tables) ──
 
-// Their lines go, from the bottom up so the line numbers of the others still hold; Undo in the toast
+// Their lines go, from the bottom up so the line numbers of the others still hold, and the foreign keys into them with
+// them: the columns stay, of the type they had. Undo in the toast, which says what went.
 function deleteTables(names) {
-  const doomed = textModel().tables.filter(t => names.includes(t.name)).sort((a, b) => b.line - a.line);
+  const { tables } = textModel();
+  const doomed = tables.filter(t => names.includes(t.name)).sort((a, b) => b.line - a.line);
   if (!doomed.length) return;
+  const gone = new Set(doomed.map(t => lc(t.name))), keys = keysInto(tables, names);
   histBegin(doomed.length > 1 ? 'delete tables' : 'delete table');
   const lines = state.text.split('\n');
+  for (const t of tables) {
+    if (gone.has(lc(t.name))) continue;
+    for (const c of t.cols) if (c.ref && gone.has(lc(c.ref))) lines[c.line - 1] = unlinkedLine(lines[c.line - 1], c);
+  }
   for (const t of doomed) {
     const [s, e] = blockRange(lines, t.line - 1);
     lines.splice(s, e - s + 1);
@@ -804,7 +803,40 @@ function deleteTables(names) {
   setSelected([...selected].filter(n => !names.includes(n)));
   commitText(lines.join('\n'), null);
   histCommit();
-  toast(doomed.length > 1 ? `Deleted ${doomed.length} tables` : `Deleted ${doomed[0].name}`, 'Undo', histUndo);
+  const what = doomed.length > 1 ? `Deleted ${doomed.length} tables` : `Deleted ${doomed[0].name}`;
+  toast(what + (keys.length === 1 ? ` and the foreign key from ${keys[0]}` : keys.length === 2 ? ` and the foreign keys from ${keys[0]} and ${keys[1]}`
+    : keys.length ? ` and ${keys.length} foreign keys into ${doomed.length > 1 ? 'them' : 'it'}` : ''), 'Undo', histUndo);
+}
+
+// The foreign keys of the other tables that point into the tables `names`, which deleting those takes along:
+// "Course.TeacherId", one over several columns "Line (OrderNo, LineNo)"
+function keysInto(tables, names) {
+  const gone = new Set(names.map(lc)), keys = [];
+  for (const t of tables) {
+    if (gone.has(lc(t.name))) continue;
+    for (const c of t.cols) {
+      if (c.ref && gone.has(lc(c.ref)) && leadsFk(c)) keys.push(c.fkGroup ? `${t.name} (${c.fkGroup.cols.map(o => o.name).join(', ')})` : `${t.name}.${c.name}`);
+    }
+  }
+  return keys;
+}
+
+// What deleting a table says of keysInto, as Squill says it; '' for none
+function keysIntoText(keys) {
+  if (!keys.length) return '';
+  if (keys.length === 1) return `${keys[0]} points here; its foreign key goes too`;
+  const which = keys.length === 2 ? `${keys[0]} and ${keys[1]}` : `${keys[0]}, ${keys[1]} and ${keys.length - 2} more`;
+  return `${which} point here; their foreign keys go too`;
+}
+
+// A column's line without its -> and the [delete …] and [update …] that go with it, of the type it had where none was
+// written; the rest as written
+function unlinkedLine(line, c) {
+  const at = commentAt(line), code = at < 0 ? line : line.slice(0, at), bi = code.indexOf('[');
+  let head = (bi < 0 ? code : code.slice(0, bi)).replace(REF_RE, '').trimEnd();
+  if (!c.type) head = head.replace(/^\s*\S+/, m => m + ' ' + c.effType); // after its name
+  const opts = bi < 0 ? [] : splitOpts(code.slice(bi + 1).replace(/\]\s*$/, '')).filter(item => !/^(delete|update)\b/i.test(item));
+  return head + (opts.length ? ` [${opts.join(', ')}]` : '') + (at < 0 ? '' : '  ' + line.slice(at));
 }
 
 // A table a foreign key points to but that isn't there yet ({ table, col, type } of the problem):
